@@ -237,7 +237,22 @@ From `apps/api` with the virtualenv active:
 PYTHONPATH=. python scripts/seed_sample_workflows.py
 ```
 
-This resets old local workflows and creates advanced local workflows for full-stack document ops, multi-RAG, persistent chat, document extraction/summarization, AI field extraction, approval review, notifications, exports, guardrails, and template testing.
+This replaces old seeded/advanced sample workflows and creates 12 advanced local workflows:
+
+- `Advanced: Multi-RAG Contract Intelligence`
+- `Advanced: Persistent Policy Copilot`
+- `Advanced: Document Extractor + Summarizer`
+- `Advanced: Finance Approval Field Extractor`
+- `Advanced: Support Triage Agent`
+- `Advanced: Local Research Brief Generator`
+- `Advanced: Compliance Evidence Dashboard`
+- `Advanced: Guardrailed Document QA`
+- `Advanced: Publish-Ready Intake App`
+- `Advanced: Insurance Claims Coverage Desk`
+- `Advanced: Insurance Underwriting Risk Workbench`
+- `Advanced: Insurance Fraud + Subrogation Triage`
+
+The refined samples cover multi-collection RAG, persistent conversation memory, query rewriting, re-ranking, citation verification, document upload/extraction, AI field extraction, schema validation, insurance claim coverage review, underwriting risk scoring, SIU/subrogation triage, approvals, notifications, exports, guardrails, web-search/page-reader placeholders, dashboard previews, JSON outputs, and run logging.
 
 ## Validation
 
