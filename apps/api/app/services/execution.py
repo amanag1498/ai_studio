@@ -96,12 +96,29 @@ def execute_workflow(
 ) -> WorkflowRun:
     workflow = get_workflow_or_404(session, workflow_id)
     graph = validate_graph_json(workflow.graph_json)
-    ordered_nodes, outgoing_edges = topological_order(graph)
-    workflow_started_perf = perf_counter()
+    workflow_run = create_workflow_run(
+        session,
+        workflow=workflow,
+        graph=graph,
+        payload=payload,
+        owner_user_id=owner_user_id,
+        status_value="running",
+    )
+    return execute_prepared_workflow_run(session, workflow_run.id, payload)
 
+
+def create_workflow_run(
+    session: Session,
+    *,
+    workflow: Workflow,
+    graph: dict[str, Any],
+    payload: ExecuteWorkflowRequest,
+    owner_user_id: int | None,
+    status_value: str = "queued",
+) -> WorkflowRun:
     workflow_run = WorkflowRun(
         workflow_id=workflow.id,
-        status="running",
+        status=status_value,
         trigger_mode=payload.trigger_mode,
         owner_user_id=owner_user_id,
         session_id=payload.session_id,
@@ -115,6 +132,27 @@ def execute_workflow(
     )
     session.add(workflow_run)
     session.flush()
+    session.commit()
+    return get_run_or_404(session, workflow.id, workflow_run.id)
+
+
+def execute_prepared_workflow_run(
+    session: Session,
+    workflow_run_id: int,
+    payload: ExecuteWorkflowRequest,
+) -> WorkflowRun:
+    workflow_run = session.get(WorkflowRun, workflow_run_id)
+    if workflow_run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found.")
+    workflow = get_workflow_or_404(session, workflow_run.workflow_id)
+    graph = validate_graph_json(workflow_run.graph_snapshot or workflow.graph_json)
+    ordered_nodes, outgoing_edges = topological_order(graph)
+    workflow_started_perf = perf_counter()
+    workflow_run.status = "running"
+    workflow_run.started_at = utc_now_naive()
+    workflow_run.log_messages = [log_entry("info", "Workflow run started.")]
+    session.add(workflow_run)
+    session.commit()
 
     context = ExecutionContext(
         session=session,

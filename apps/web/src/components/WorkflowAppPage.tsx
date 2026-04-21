@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  executeWorkflow,
+  executeWorkflowAsync,
+  getRunEventsUrl,
   getWorkflow,
+  getWorkflowRun,
   uploadRuntimeFile,
   type RuntimeUploadResponse,
   type WorkflowRecord,
@@ -167,12 +169,18 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
         }
       }
 
-      const nextRun = await executeWorkflow(workflow.id, {
+      const queued = await executeWorkflowAsync(workflow.id, {
         trigger_mode: "workflow_app",
         session_id: sessionId,
         user_id: userId,
         inputs,
       });
+      setExecutionSteps([
+        { label: "Validate inputs", status: "done", detail: "Runtime inputs were accepted." },
+        { label: "Execute DAG", status: "running", detail: `Run #${queued.run_id} is running in the background queue.` },
+        { label: "Collect outputs", status: "pending", detail: "Waiting for final node outputs." },
+      ]);
+      const nextRun = await waitForRunEvents(workflow.id, queued.run_id);
       setRun(nextRun);
       setExecutionSteps([
         { label: "Validate inputs", status: "done", detail: "Runtime inputs were accepted." },
@@ -199,6 +207,40 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
     } finally {
       setIsRunning(false);
     }
+  }
+
+  function waitForRunEvents(nextWorkflowId: number, runId: number) {
+    return new Promise<WorkflowRunRecord>((resolve, reject) => {
+      const source = new EventSource(getRunEventsUrl(nextWorkflowId, runId));
+      source.addEventListener("run_update", (event) => {
+        const nextRun = JSON.parse((event as MessageEvent).data) as WorkflowRunRecord;
+        setRun(nextRun);
+        setStatus(`Run #${nextRun.id} ${nextRun.status}.`);
+        setExecutionSteps((current) =>
+          current.map((step) =>
+            step.label === "Execute DAG"
+              ? {
+                  ...step,
+                  status: nextRun.status === "failed" ? "failed" : nextRun.status === "completed" ? "done" : "running",
+                  detail: `${nextRun.node_runs?.length || 0} node event(s), ${nextRun.latency_ms || 0}ms.`,
+                }
+              : step,
+          ),
+        );
+      });
+      source.addEventListener("run_done", (event) => {
+        source.close();
+        resolve(JSON.parse((event as MessageEvent).data) as WorkflowRunRecord);
+      });
+      source.onerror = async () => {
+        source.close();
+        try {
+          resolve(await getWorkflowRun(nextWorkflowId, runId));
+        } catch (error) {
+          reject(error);
+        }
+      };
+    });
   }
 
   return (

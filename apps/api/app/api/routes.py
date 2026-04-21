@@ -1,13 +1,17 @@
+import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.orm import Session
 
 from app.core.block_registry import BLOCK_DEFINITIONS
 from app.core.config import settings
 from app.db.deps import get_db
+from app.db.session import SessionLocal
 from app.models.workflow import (
     AppUser,
     KnowledgeChunk,
@@ -41,6 +45,7 @@ from app.schemas.workflows import (
 from app.services.admin import get_usage_dashboard
 from app.services.auth import create_local_session_token, create_local_user, login_local_user
 from app.services.execution import execute_workflow, get_run_or_404
+from app.services.execution_queue import enqueue_workflow_execution
 from app.services.files import persist_runtime_upload
 from app.services.parsers import parse_uploaded_file
 from app.services.rag import build_rag_config, retrieve_relevant_chunks
@@ -71,6 +76,43 @@ def get_current_user_id(x_local_user_id: int | None = Header(default=None), db: 
         return None
     user = db.get(AppUser, x_local_user_id)
     return user.id if user and user.is_active else None
+
+
+ROLE_RANK = {"viewer": 1, "runner": 2, "editor": 3, "owner": 4}
+
+
+def ensure_workflow_access(
+    db: Session,
+    workflow: Workflow,
+    current_user_id: int | None,
+    *,
+    required_role: str = "viewer",
+) -> None:
+    if current_user_id is None:
+        return
+    if workflow.created_by_user_id in {None, current_user_id} or workflow.updated_by_user_id == current_user_id:
+        return
+    permission = db.scalar(
+        select(WorkflowPermission).where(
+            WorkflowPermission.workflow_id == workflow.id,
+            WorkflowPermission.user_id == current_user_id,
+        )
+    )
+    if permission and ROLE_RANK.get(permission.role, 0) >= ROLE_RANK.get(required_role, 1):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this workflow.")
+
+
+def get_authorized_workflow(
+    db: Session,
+    workflow_id: int,
+    current_user_id: int | None,
+    *,
+    required_role: str = "viewer",
+) -> Workflow:
+    workflow = get_workflow_or_404(db, workflow_id)
+    ensure_workflow_access(db, workflow, current_user_id, required_role=required_role)
+    return workflow
 
 
 def workflow_summary_payload(db: Session, workflow: Workflow) -> dict:
@@ -456,8 +498,23 @@ def create_workflow_route(
 def list_workflows_route(
     include_archived: bool = Query(default=False),
     db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
 ) -> list[dict]:
     workflows = list_workflows(db, include_archived=include_archived)
+    if current_user_id is not None:
+        permitted_workflow_ids = {
+            row[0]
+            for row in db.execute(
+                select(WorkflowPermission.workflow_id).where(WorkflowPermission.user_id == current_user_id)
+            )
+        }
+        workflows = [
+            workflow
+            for workflow in workflows
+            if workflow.created_by_user_id in {None, current_user_id}
+            or workflow.updated_by_user_id == current_user_id
+            or workflow.id in permitted_workflow_ids
+        ]
     return [workflow_summary_payload(db, workflow) for workflow in workflows]
 
 
@@ -483,8 +540,12 @@ def import_workflow_bundle_route(
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowRead, tags=["workflows"])
-def get_workflow_route(workflow_id: int, db: Session = Depends(get_db)) -> WorkflowRead:
-    workflow = get_workflow_or_404(db, workflow_id)
+def get_workflow_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> WorkflowRead:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id)
     return WorkflowRead.model_validate(workflow)
 
 
@@ -495,7 +556,7 @@ def update_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = get_workflow_or_404(db, workflow_id)
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
     validated_graph = validate_graph(payload.graph)
     updated_workflow = update_workflow(
         db,
@@ -516,7 +577,7 @@ def update_workflow_metadata_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = get_workflow_or_404(db, workflow_id)
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
     if payload.name is not None:
         workflow.name = payload.name
         workflow.graph_json = {**workflow.graph_json, "name": payload.name}
@@ -537,7 +598,7 @@ def archive_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = archive_workflow(db, get_workflow_or_404(db, workflow_id), user_id=current_user_id)
+    workflow = archive_workflow(db, get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor"), user_id=current_user_id)
     return WorkflowRead.model_validate(workflow)
 
 
@@ -547,7 +608,7 @@ def restore_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = restore_workflow(db, get_workflow_or_404(db, workflow_id), user_id=current_user_id)
+    workflow = restore_workflow(db, get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor"), user_id=current_user_id)
     return WorkflowRead.model_validate(workflow)
 
 
@@ -557,7 +618,7 @@ def duplicate_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = duplicate_workflow(db, get_workflow_or_404(db, workflow_id), user_id=current_user_id)
+    workflow = duplicate_workflow(db, get_authorized_workflow(db, workflow_id, current_user_id), user_id=current_user_id)
     if workflow.description == "Advanced seeded workflow for local testing.":
         workflow.description = "Duplicated workflow workspace."
         db.add(workflow)
@@ -567,8 +628,12 @@ def duplicate_workflow_route(
 
 
 @router.delete("/workflows/{workflow_id}", tags=["workflows"])
-def delete_workflow_route(workflow_id: int, db: Session = Depends(get_db)) -> dict:
-    workflow = get_workflow_or_404(db, workflow_id)
+def delete_workflow_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
     workflow.published_version_id = None
     workflow.published_slug = None
     workflow.is_published = False
@@ -616,8 +681,9 @@ def save_workflow_version_route(
     workflow_id: int,
     payload: WorkflowVersionCreate,
     db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowVersionRead:
-    workflow = get_workflow_or_404(db, workflow_id)
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
     validated_graph = validate_graph(payload.graph)
     version = save_workflow_version(
         db,
@@ -635,7 +701,7 @@ def restore_workflow_version_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = get_workflow_or_404(db, workflow_id)
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
     version = next((item for item in workflow.versions if item.id == version_id), None)
     if version is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found.")
@@ -653,8 +719,13 @@ def restore_workflow_version_route(
 
 
 @router.get("/workflows/{workflow_id}/versions/{version_id}/compare", tags=["workflows"])
-def compare_workflow_version_route(workflow_id: int, version_id: int, db: Session = Depends(get_db)) -> dict:
-    workflow = get_workflow_or_404(db, workflow_id)
+def compare_workflow_version_route(
+    workflow_id: int,
+    version_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id)
     version = db.get(WorkflowVersion, version_id)
     if version is None or version.workflow_id != workflow_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found.")
@@ -668,8 +739,12 @@ def compare_workflow_version_route(workflow_id: int, version_id: int, db: Sessio
 
 
 @router.get("/workflows/{workflow_id}/permissions", response_model=list[WorkflowPermissionRead], tags=["workflows"])
-def list_workflow_permissions_route(workflow_id: int, db: Session = Depends(get_db)) -> list[WorkflowPermissionRead]:
-    get_workflow_or_404(db, workflow_id)
+def list_workflow_permissions_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[WorkflowPermissionRead]:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
     permissions = list(
         db.scalars(
             select(WorkflowPermission)
@@ -696,8 +771,9 @@ def add_workflow_permission_route(
     workflow_id: int,
     payload: WorkflowPermissionCreate,
     db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowPermissionRead:
-    get_workflow_or_404(db, workflow_id)
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
     user = db.scalar(select(AppUser).where(AppUser.email == payload.email.strip().lower()))
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Local user with this email was not found.")
@@ -727,7 +803,13 @@ def add_workflow_permission_route(
 
 
 @router.delete("/workflows/{workflow_id}/permissions/{permission_id}", tags=["workflows"])
-def delete_workflow_permission_route(workflow_id: int, permission_id: int, db: Session = Depends(get_db)) -> dict:
+def delete_workflow_permission_route(
+    workflow_id: int,
+    permission_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
     permission = db.get(WorkflowPermission, permission_id)
     if permission is None or permission.workflow_id != workflow_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow permission not found.")
@@ -812,8 +894,27 @@ def execute_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRunRead:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
     workflow_run = execute_workflow(db, workflow_id, payload, owner_user_id=current_user_id)
     return WorkflowRunRead.model_validate(workflow_run)
+
+
+@router.post("/workflows/{workflow_id}/execute-async", status_code=status.HTTP_202_ACCEPTED, tags=["execution"])
+def execute_workflow_async_route(
+    workflow_id: int,
+    payload: ExecuteWorkflowRequest,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    queued = enqueue_workflow_execution(workflow_id, payload, owner_user_id=current_user_id)
+    return {
+        "workflow_id": queued.workflow_id,
+        "run_id": queued.run_id,
+        "status": queued.status,
+        "queued_at": queued.queued_at,
+        "events_url": f"/workflows/{workflow_id}/runs/{queued.run_id}/events",
+    }
 
 
 @router.get("/workflows/{workflow_id}/runs/{run_id}", response_model=WorkflowRunRead, tags=["execution"])
@@ -821,14 +922,20 @@ def get_workflow_run_route(
     workflow_id: int,
     run_id: int,
     db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRunRead:
+    get_authorized_workflow(db, workflow_id, current_user_id)
     workflow_run = get_run_or_404(db, workflow_id, run_id)
     return WorkflowRunRead.model_validate(workflow_run)
 
 
 @router.get("/workflows/{workflow_id}/runs", response_model=list[WorkflowRunRead], tags=["execution"])
-def list_workflow_runs_route(workflow_id: int, db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
-    get_workflow_or_404(db, workflow_id)
+def list_workflow_runs_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[WorkflowRunRead]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
     runs = list(
         db.scalars(
             select(WorkflowRun)
@@ -840,9 +947,48 @@ def list_workflow_runs_route(workflow_id: int, db: Session = Depends(get_db)) ->
     return [WorkflowRunRead.model_validate(run) for run in runs]
 
 
+@router.get("/workflows/{workflow_id}/runs/{run_id}/events", tags=["execution"])
+async def stream_workflow_run_events_route(
+    workflow_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> StreamingResponse:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+
+    async def event_stream():
+        last_signature = ""
+        while True:
+            with SessionLocal() as stream_db:
+                run = get_run_or_404(stream_db, workflow_id, run_id)
+                payload = WorkflowRunRead.model_validate(run).model_dump(mode="json")
+            signature = json.dumps(
+                {
+                    "status": payload["status"],
+                    "node_count": len(payload.get("node_runs", [])),
+                    "latency_ms": payload.get("latency_ms"),
+                    "error_message": payload.get("error_message"),
+                },
+                sort_keys=True,
+            )
+            if signature != last_signature:
+                last_signature = signature
+                yield f"event: run_update\ndata: {json.dumps(payload)}\n\n"
+            if payload["status"] in {"completed", "failed", "cancelled"}:
+                yield f"event: run_done\ndata: {json.dumps(payload)}\n\n"
+                break
+            await asyncio.sleep(0.75)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @router.get("/workflows/{workflow_id}/knowledge/collections", tags=["knowledge"])
-def list_knowledge_collections_route(workflow_id: int, db: Session = Depends(get_db)) -> list[dict]:
-    get_workflow_or_404(db, workflow_id)
+def list_knowledge_collections_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
     rows = db.execute(
         select(
             KnowledgeDocument.collection_name,
@@ -865,8 +1011,13 @@ def list_knowledge_collections_route(workflow_id: int, db: Session = Depends(get
 
 
 @router.get("/workflows/{workflow_id}/knowledge/collections/{collection_name}/documents", tags=["knowledge"])
-def list_collection_documents_route(workflow_id: int, collection_name: str, db: Session = Depends(get_db)) -> list[dict]:
-    get_workflow_or_404(db, workflow_id)
+def list_collection_documents_route(
+    workflow_id: int,
+    collection_name: str,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
     documents = list(
         db.scalars(
             select(KnowledgeDocument)
@@ -892,7 +1043,13 @@ def list_collection_documents_route(workflow_id: int, collection_name: str, db: 
 
 
 @router.get("/workflows/{workflow_id}/knowledge/documents/{document_id}/chunks", tags=["knowledge"])
-def list_document_chunks_route(workflow_id: int, document_id: int, db: Session = Depends(get_db)) -> list[dict]:
+def list_document_chunks_route(
+    workflow_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
     document = db.get(KnowledgeDocument, document_id)
     if document is None or document.workflow_id != workflow_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge document not found.")
@@ -916,8 +1073,9 @@ def test_collection_retrieval_route(
     collection_name: str,
     payload: dict,
     db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
 ) -> dict:
-    workflow = get_workflow_or_404(db, workflow_id)
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id)
     query = str(payload.get("query", ""))
     top_k = int(payload.get("top_k", 4))
     rag_config = build_rag_config(
@@ -947,8 +1105,13 @@ def test_collection_retrieval_route(
 
 
 @router.delete("/workflows/{workflow_id}/knowledge/collections/{collection_name}", tags=["knowledge"])
-def delete_collection_route(workflow_id: int, collection_name: str, db: Session = Depends(get_db)) -> dict:
-    get_workflow_or_404(db, workflow_id)
+def delete_collection_route(
+    workflow_id: int,
+    collection_name: str,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
     document_ids = [
         row[0]
         for row in db.execute(
@@ -964,6 +1127,28 @@ def delete_collection_route(workflow_id: int, collection_name: str, db: Session 
     db.commit()
     get_default_vector_store().delete_collection(collection_name=collection_name)
     return {"deleted": True, "collection_name": collection_name, "document_count": len(document_ids)}
+
+
+@router.post("/workflows/{workflow_id}/knowledge/collections/{collection_name}/reingest", tags=["knowledge"])
+def reingest_collection_route(
+    workflow_id: int,
+    collection_name: str,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
+    rag_config = build_rag_config({"collection": collection_name, "topK": 4})
+    from app.services.embeddings import get_default_embedding_provider
+    from app.services.rag import heal_vector_collection
+
+    summary = heal_vector_collection(
+        db,
+        workflow=workflow,
+        rag_config=rag_config,
+        embedding_provider=get_default_embedding_provider(),
+        vector_store=get_default_vector_store(),
+    )
+    return {"collection_name": collection_name, **summary}
 
 
 @router.post(

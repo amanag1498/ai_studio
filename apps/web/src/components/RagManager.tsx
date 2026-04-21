@@ -4,6 +4,7 @@ import {
   listCollectionDocuments,
   listDocumentChunks,
   listKnowledgeCollections,
+  reingestKnowledgeCollection,
   testKnowledgeRetrieval,
   type KnowledgeChunkRecord,
   type KnowledgeCollection,
@@ -65,6 +66,14 @@ export function RagManager({ workflowId }: RagManagerProps) {
     setDocuments([]);
     setChunks([]);
     setRetrieval(null);
+    await refreshCollections();
+  }
+
+  async function reingestCollection() {
+    if (!workflowId || !selectedCollection) return;
+    setStatus(`Re-ingesting ${selectedCollection} from SQLite chunks into Chroma.`);
+    const result = await reingestKnowledgeCollection(workflowId, selectedCollection);
+    setStatus(`Self-healed ${result.chunks_repaired}/${result.chunks_seen} chunk(s): ${result.reason}.`);
     await refreshCollections();
   }
 
@@ -138,9 +147,14 @@ export function RagManager({ workflowId }: RagManagerProps) {
         </div>
       ) : null}
 
-      <button type="button" onClick={() => void removeCollection()} disabled={!selectedCollection} className="mt-3 w-full rounded-2xl border border-coral/30 bg-coral/10 px-3 py-2 text-sm font-semibold disabled:opacity-50">
-        Delete Collection
-      </button>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <button type="button" onClick={() => void reingestCollection()} disabled={!selectedCollection} className="rounded-2xl bg-lime/30 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+          Re-ingest / Self-heal
+        </button>
+        <button type="button" onClick={() => void removeCollection()} disabled={!selectedCollection} className="rounded-2xl border border-coral/30 bg-coral/10 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+          Delete Collection
+        </button>
+      </div>
     </div>
   );
 }

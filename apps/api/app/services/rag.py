@@ -246,7 +246,45 @@ def retrieve_relevant_chunks(
     vector_store = vector_store or get_default_vector_store()
 
     query_embedding = embedding_provider.embed_texts([query])[0]
-    matches = vector_store.query(
+    matches = query_vector_store(
+        vector_store=vector_store,
+        workflow=workflow,
+        rag_config=rag_config,
+        query_embedding=query_embedding,
+    )
+    retrieved = hydrate_vector_matches(session, workflow=workflow, rag_config=rag_config, matches=matches)
+    if retrieved:
+        return retrieved
+
+    heal_summary = heal_vector_collection(
+        session,
+        workflow=workflow,
+        rag_config=rag_config,
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+    )
+    if heal_summary["chunks_repaired"]:
+        matches = query_vector_store(
+            vector_store=vector_store,
+            workflow=workflow,
+            rag_config=rag_config,
+            query_embedding=query_embedding,
+        )
+        retrieved = hydrate_vector_matches(session, workflow=workflow, rag_config=rag_config, matches=matches)
+        if retrieved:
+            return retrieved
+
+    return lexical_fallback_search(session, workflow=workflow, rag_config=rag_config, query=query)
+
+
+def query_vector_store(
+    *,
+    vector_store: VectorStore,
+    workflow: Workflow,
+    rag_config: RagKnowledgeConfig,
+    query_embedding: list[float],
+) -> list[dict[str, Any]]:
+    return vector_store.query(
         collection_name=rag_config.collection_name,
         query_embedding=query_embedding,
         top_k=rag_config.top_k,
@@ -256,6 +294,14 @@ def retrieve_relevant_chunks(
         },
     )
 
+
+def hydrate_vector_matches(
+    session: Session,
+    *,
+    workflow: Workflow,
+    rag_config: RagKnowledgeConfig,
+    matches: list[dict[str, Any]],
+) -> list[RetrievedChunk]:
     vector_ids = [match["id"] for match in matches]
     if not vector_ids:
         return []
@@ -292,6 +338,99 @@ def retrieve_relevant_chunks(
             )
         )
     return retrieved[: rag_config.top_k]
+
+
+def heal_vector_collection(
+    session: Session,
+    *,
+    workflow: Workflow,
+    rag_config: RagKnowledgeConfig,
+    embedding_provider: EmbeddingProvider,
+    vector_store: VectorStore,
+) -> dict[str, Any]:
+    chunks = list(
+        session.scalars(
+            select(KnowledgeChunk)
+            .where(
+                KnowledgeChunk.workflow_id == workflow.id,
+                KnowledgeChunk.collection_name == rag_config.collection_name,
+            )
+            .order_by(KnowledgeChunk.id)
+        )
+    )
+    if not chunks:
+        return {"chunks_seen": 0, "chunks_repaired": 0, "reason": "no_sqlite_chunks"}
+
+    embeddings = embedding_provider.embed_texts([chunk.chunk_text for chunk in chunks])
+    vector_store.upsert(
+        collection_name=rag_config.collection_name,
+        ids=[chunk.vector_id for chunk in chunks],
+        embeddings=embeddings,
+        documents=[chunk.chunk_text for chunk in chunks],
+        metadatas=[
+            {
+                "knowledge_chunk_id": chunk.id,
+                "knowledge_document_id": chunk.document_id,
+                "workflow_id": workflow.id,
+                "collection_name": rag_config.collection_name,
+                "chunk_index": chunk.chunk_index,
+                "title": chunk.metadata_json.get("title"),
+                "tags": ",".join(normalize_tags(chunk.metadata_json.get("tags", []))),
+                "self_healed": True,
+            }
+            for chunk in chunks
+        ],
+    )
+    return {"chunks_seen": len(chunks), "chunks_repaired": len(chunks), "reason": "reindexed_from_sqlite"}
+
+
+def lexical_fallback_search(
+    session: Session,
+    *,
+    workflow: Workflow,
+    rag_config: RagKnowledgeConfig,
+    query: str,
+) -> list[RetrievedChunk]:
+    query_terms = {term.lower() for term in query.split() if len(term) > 2}
+    if not query_terms:
+        return []
+    chunks = list(
+        session.scalars(
+            select(KnowledgeChunk)
+            .where(
+                KnowledgeChunk.workflow_id == workflow.id,
+                KnowledgeChunk.collection_name == rag_config.collection_name,
+            )
+            .order_by(KnowledgeChunk.id.desc())
+            .limit(500)
+        )
+    )
+    scored: list[tuple[int, KnowledgeChunk]] = []
+    for chunk in chunks:
+        chunk_tags = normalize_tags(chunk.metadata_json.get("tags", []))
+        if rag_config.tags and not set(rag_config.tags).issubset(set(chunk_tags)):
+            continue
+        text = chunk.chunk_text.lower()
+        score = sum(1 for term in query_terms if term in text)
+        if score:
+            scored.append((score, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        RetrievedChunk(
+            chunk_id=chunk.id,
+            vector_id=chunk.vector_id,
+            text=chunk.chunk_text,
+            score=max(0.0, 1.0 - (score / max(len(query_terms), 1))),
+            metadata={
+                **chunk.metadata_json,
+                "workflow_id": chunk.workflow_id,
+                "document_id": chunk.document_id,
+                "collection_name": chunk.collection_name,
+                "retrieval_mode": "lexical_self_healing_fallback",
+            },
+        )
+        for score, chunk in scored[: rag_config.top_k]
+    ]
 
 
 def filter_documents_for_ingestion(

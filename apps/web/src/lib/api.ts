@@ -390,6 +390,28 @@ export function executeWorkflow(
   });
 }
 
+export function executeWorkflowAsync(
+  workflowId: number,
+  payload: {
+    trigger_mode: string;
+    session_id: string;
+    user_id: string;
+    inputs: Record<string, { value: string; files: string[]; metadata: Record<string, string> }>;
+  },
+) {
+  return requestJson<{ workflow_id: number; run_id: number; status: string; queued_at: string; events_url: string }>(
+    `/workflows/${workflowId}/execute-async`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getRunEventsUrl(workflowId: number, runId: number) {
+  return `${API_BASE_URL}/workflows/${workflowId}/runs/${runId}/events`;
+}
+
 export function listWorkflowRuns(workflowId: number) {
   return requestJson<WorkflowRunRecord[]>(`/workflows/${workflowId}/runs`);
 }
@@ -515,6 +537,13 @@ export function deleteKnowledgeCollection(workflowId: number, collectionName: st
   return requestJson<{ deleted: boolean; collection_name: string; document_count: number }>(
     `/workflows/${workflowId}/knowledge/collections/${encodeURIComponent(collectionName)}`,
     { method: "DELETE" },
+  );
+}
+
+export function reingestKnowledgeCollection(workflowId: number, collectionName: string) {
+  return requestJson<{ collection_name: string; chunks_seen: number; chunks_repaired: number; reason: string }>(
+    `/workflows/${workflowId}/knowledge/collections/${encodeURIComponent(collectionName)}/reingest`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 }
 

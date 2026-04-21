@@ -1224,6 +1224,15 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     );
   }
 
+  function addExtractionSchemaField(fieldName: string) {
+    if (!selectedNode) return;
+    const current = String(selectedNode.data.config.schemaPrompt || "");
+    const nextPrompt = current.includes(fieldName)
+      ? current
+      : `${current.trim()}\n- ${fieldName}: describe the ${fieldName.replace(/_/g, " ")} value`.trim();
+    updateSelectedNodeField({ key: "schemaPrompt", label: "Schema", kind: "textarea", defaultValue: nextPrompt }, nextPrompt);
+  }
+
   function updateSelectedNodeLabel(label: string) {
     if (!selectedNode) {
       return;
@@ -1757,7 +1766,28 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
 
                 {selectedNode.data.blockType === "extraction_ai" ? (
                   <div className="rounded-[1.4rem] bg-mist/70 p-4">
-                    <p className="text-sm font-semibold text-ink">JSON Schema Shortcuts</p>
+                    <p className="text-sm font-semibold text-ink">Visual JSON Schema Editor</p>
+                    <p className="mt-1 text-xs leading-5 text-ink/55">
+                      Build the Extraction AI output contract as fields. These chips update the schema prompt used by the executor.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {["title", "summary", "risks", "owners", "important_dates", "action_items", "confidence", "source_notes"].map((fieldName) => (
+                        <button
+                          key={fieldName}
+                          type="button"
+                          onClick={() => addExtractionSchemaField(fieldName)}
+                          className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-ink ring-1 ring-ink/8 transition hover:bg-lime/30"
+                        >
+                          + {fieldName}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-3 rounded-2xl bg-white p-3 text-xs leading-5 text-ink/62">
+                      <p className="font-semibold text-ink">Current contract</p>
+                      <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap">
+                        {String(selectedNode.data.config.schemaPrompt || "No schema prompt yet. Add fields above.")}
+                      </pre>
+                    </div>
                     <div className="mt-3 grid gap-2">
                       {[
                         "Extract title, summary, action_items, risks, and owners as JSON.",
