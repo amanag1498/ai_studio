@@ -150,6 +150,40 @@ async def persist_runtime_upload(
     }
 
 
+async def persist_library_upload(
+    session: Session,
+    upload: UploadFile,
+    *,
+    max_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_BYTES,
+    accepted_extensions: set[str] | None = None,
+    workflow: Workflow | None = None,
+    node_id: str = "library_upload",
+) -> UploadedFile:
+    persisted = await persist_runtime_upload(
+        upload,
+        max_size_bytes=max_size_bytes,
+        accepted_extensions=accepted_extensions,
+    )
+    uploaded_file = UploadedFile(
+        workflow_id=workflow.id if workflow else None,
+        workflow_run_id=None,
+        node_id=node_id,
+        original_name=persisted["original_name"],
+        stored_name=persisted["stored_name"],
+        extension=persisted["extension"],
+        mime_type=persisted["mime_type"],
+        size_bytes=persisted["size_bytes"],
+        storage_path=persisted["storage_path"],
+        metadata_json={
+            "source": "file_library",
+            "relative_storage_path": persisted["relative_storage_path"],
+        },
+    )
+    session.add(uploaded_file)
+    session.flush()
+    return uploaded_file
+
+
 def parse_max_size_bytes(config: dict) -> int:
     value = config.get("maxSizeMb", 10)
     try:

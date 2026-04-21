@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,12 +15,17 @@ from app.db.deps import get_db
 from app.db.session import SessionLocal
 from app.models.workflow import (
     AppUser,
+    AuditLog,
+    RagEvaluation,
     KnowledgeChunk,
     KnowledgeDocument,
     UploadedFile,
     Workflow,
+    WorkflowChangeEvent,
+    WorkflowComment,
     WorkflowPermission,
     WorkflowRun,
+    WorkflowSubflow,
     WorkflowVersion,
 )
 from app.schemas.auth import AppUserRead, AuthResponse, UserLoginRequest, UserSignupRequest
@@ -44,9 +50,10 @@ from app.schemas.workflows import (
 )
 from app.services.admin import get_usage_dashboard
 from app.services.auth import create_local_session_token, create_local_user, login_local_user
-from app.services.execution import execute_workflow, get_run_or_404
+from app.services.execution import ExecutionContext, TypedPayload, execute_node, execute_workflow, get_run_or_404, typed_payload
 from app.services.execution_queue import enqueue_workflow_execution
-from app.services.files import persist_runtime_upload
+from app.services.files import persist_library_upload, persist_runtime_upload
+from app.services.observability import audit_event, evaluate_rag_result, get_observability_dashboard
 from app.services.parsers import parse_uploaded_file
 from app.services.rag import build_rag_config, retrieve_relevant_chunks
 from app.services.vector_store import get_default_vector_store
@@ -133,6 +140,41 @@ def workflow_summary_payload(db: Session, workflow: Workflow) -> dict:
     rag_document_count = db.scalar(select(func.count(KnowledgeDocument.id)).where(KnowledgeDocument.workflow_id == workflow.id)) or 0
     rag_chunk_count = db.scalar(select(func.count(KnowledgeChunk.id)).where(KnowledgeChunk.workflow_id == workflow.id)) or 0
     rag_last_ingested_at = db.scalar(select(func.max(KnowledgeDocument.created_at)).where(KnowledgeDocument.workflow_id == workflow.id))
+    graph_nodes = workflow.graph_json.get("nodes", []) if isinstance(workflow.graph_json, dict) else []
+    graph_edges = workflow.graph_json.get("edges", []) if isinstance(workflow.graph_json, dict) else []
+    block_types = {node.get("data", {}).get("blockType") for node in graph_nodes}
+    quality_checks = {
+        "has_input": bool(block_types & {"chat_input", "text_input", "file_upload", "form_input", "webhook_trigger"}),
+        "has_output": bool(block_types & {"chat_output", "json_output", "dashboard_preview", "logger", "csv_excel_export"}),
+        "has_connections": bool(graph_edges),
+        "has_run": bool(last_run),
+        "rag_healthy": "rag_knowledge" not in block_types or rag_chunk_count > 0,
+        "has_error_visibility": bool(block_types & {"logger", "dashboard_preview", "error_handler"}),
+        "has_version_history": workflow.latest_saved_version >= 1,
+        "has_publish_path": bool(workflow.is_published or block_types & {"chat_output", "dashboard_preview", "json_output"}),
+        "has_observability": bool(block_types & {"logger", "dashboard_preview"} or runs),
+    }
+    quality_recommendations = []
+    if not quality_checks["has_input"]:
+        quality_recommendations.append("Add a runtime input block such as Chat Input, Text Input, File Upload, or Form Input.")
+    if not quality_checks["has_output"]:
+        quality_recommendations.append("Add Chat Output, JSON Output, Dashboard/Preview, Logger, or CSV Export.")
+    if not quality_checks["has_run"]:
+        quality_recommendations.append("Run the workflow once to validate execution and generate previews.")
+    if not quality_checks["rag_healthy"]:
+        quality_recommendations.append("Ingest documents into the RAG collection or re-ingest from the Knowledge tab.")
+    if not quality_checks["has_error_visibility"]:
+        quality_recommendations.append("Add Logger or Dashboard/Preview so non-technical users can debug outputs.")
+    workflow_type = (
+        "chatbot"
+        if {"chat_input", "chat_output"}.issubset(block_types)
+        else "document"
+        if "file_upload" in block_types
+        else "rag"
+        if "rag_knowledge" in block_types
+        else "automation"
+    )
+    quality_score = round((sum(1 for value in quality_checks.values() if value) / len(quality_checks)) * 100)
     return {
         "id": workflow.id,
         "name": workflow.name,
@@ -152,12 +194,41 @@ def workflow_summary_payload(db: Session, workflow: Workflow) -> dict:
         "last_run_status": last_run.status if last_run else None,
         "last_run_error": last_run.error_message if last_run else None,
         "last_run_at": last_run.started_at if last_run else None,
+        "last_run_preview": summarize_run_preview(last_run.output_payload if last_run else None),
+        "workflow_type": workflow_type,
+        "quality_score": quality_score,
+        "quality_checks": quality_checks,
+        "quality_recommendations": quality_recommendations,
         "rag_document_count": rag_document_count,
         "rag_chunk_count": rag_chunk_count,
         "rag_last_ingested_at": rag_last_ingested_at,
         "created_at": workflow.created_at,
         "updated_at": workflow.updated_at,
     }
+
+
+def summarize_run_preview(output_payload: dict | None) -> str | None:
+    if not output_payload:
+        return None
+    for output_group in output_payload.values():
+        if not isinstance(output_group, dict):
+            continue
+        for payload in output_group.values():
+            if not isinstance(payload, dict):
+                continue
+            value = payload.get("value")
+            preview = payload.get("preview")
+            if isinstance(value, dict) and isinstance(value.get("answer"), str):
+                return value["answer"][:240]
+            if isinstance(value, str) and value.strip():
+                return value[:240]
+            if isinstance(preview, dict):
+                for key in ("answer_preview", "text_preview", "summary", "preview"):
+                    if isinstance(preview.get(key), str):
+                        return preview[key][:240]
+            if isinstance(preview, str) and preview.strip():
+                return preview[:240]
+    return None
 
 
 def score_to_relevance(score: float | None) -> float:
@@ -171,6 +242,64 @@ def calculate_retrieval_confidence(chunks: list) -> float:
         return 0.0
     relevances = [score_to_relevance(chunk.score) for chunk in chunks]
     return round(sum(relevances) / len(relevances), 3)
+
+
+def build_collection_diagnostics(db: Session, workflow_id: int, collection_name: str) -> dict:
+    documents = list(
+        db.scalars(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.workflow_id == workflow_id,
+                KnowledgeDocument.collection_name == collection_name,
+            )
+        )
+    )
+    chunks = list(
+        db.scalars(
+            select(KnowledgeChunk).where(
+                KnowledgeChunk.workflow_id == workflow_id,
+                KnowledgeChunk.collection_name == collection_name,
+            )
+        )
+    )
+    checksum_counts: dict[str, int] = {}
+    for document in documents:
+        if document.checksum:
+            checksum_counts[document.checksum] = checksum_counts.get(document.checksum, 0) + 1
+    duplicate_documents = sum(count - 1 for count in checksum_counts.values() if count > 1)
+    failed_documents = [document for document in documents if document.text_length <= 0]
+    stale_chunks = [chunk for chunk in chunks if chunk.embedding_model != settings.embedding_model]
+    last_ingested_at = max((document.created_at for document in documents), default=None)
+    recommendations: list[str] = []
+    if documents and not chunks:
+        recommendations.append("Collection has documents but no chunks. Re-ingest this collection.")
+    if failed_documents:
+        recommendations.append("Some documents produced no extracted text. Reprocess the file or add OCR later.")
+    if stale_chunks:
+        recommendations.append("Some chunks were embedded with an older model. Re-ingest to refresh embeddings.")
+    if duplicate_documents:
+        recommendations.append("Duplicate documents detected. Delete duplicates to improve retrieval quality.")
+    if not documents:
+        recommendations.append("No documents found. Run an ingest workflow or upload files first.")
+    return {
+        "collection_name": collection_name,
+        "document_count": len(documents),
+        "chunk_count": len(chunks),
+        "duplicate_document_count": duplicate_documents,
+        "failed_document_count": len(failed_documents),
+        "stale_embedding_count": len(stale_chunks),
+        "broken_collection": bool(documents and not chunks),
+        "last_ingested_at": last_ingested_at,
+        "self_healing_available": bool(chunks),
+        "health_score": max(
+            0,
+            100
+            - (50 if documents and not chunks else 0)
+            - min(25, len(failed_documents) * 5)
+            - min(25, len(stale_chunks) * 2)
+            - min(15, duplicate_documents * 3),
+        ),
+        "recommendations": recommendations,
+    }
 
 
 def humanize_block_type(block_type: str) -> str:
@@ -223,6 +352,87 @@ def compare_graphs(current_graph: dict, version_graph: dict) -> dict:
         "removed_edges": removed_edges,
         "changed_edges": changed_edges,
     }
+
+
+def block_node(block_type: str, node_id: str, x: int, y: int, config: dict | None = None) -> dict:
+    title = humanize_block_type(block_type)
+    return {
+        "id": node_id,
+        "type": "builderBlock",
+        "position": {"x": x, "y": y},
+        "data": {
+            "blockType": block_type,
+            "label": title,
+            "kind": "agent" if block_type in {"chatbot", "extraction_ai", "summarizer", "query_rewriter"} else "knowledge" if block_type in {"rag_knowledge", "text_extraction", "re_ranker", "citation_verifier"} else "input" if block_type in {"chat_input", "file_upload", "text_input"} else "output",
+            "category": "AI" if block_type in {"chatbot", "extraction_ai", "summarizer", "query_rewriter"} else "Knowledge" if block_type in {"rag_knowledge", "text_extraction", "re_ranker", "citation_verifier"} else "Inputs" if block_type in {"chat_input", "file_upload", "text_input"} else "Outputs",
+            "description": f"Auto-built {title} block.",
+            "accentColor": "#57c5a0",
+            "icon": "".join(part[0] for part in title.split())[:2].upper(),
+            "inputs": [{"id": port.id, "label": humanize_block_type(port.id), "direction": "input", "dataTypes": list(port.data_types), "required": port.required} for port in BLOCK_DEFINITIONS[block_type].inputs],
+            "outputs": [{"id": port.id, "label": humanize_block_type(port.id), "direction": "output", "dataTypes": list(port.data_types)} for port in BLOCK_DEFINITIONS[block_type].outputs],
+            "config": default_block_config(block_type) | (config or {}),
+        },
+    }
+
+
+def default_block_config(block_type: str) -> dict:
+    defaults = {
+        "chat_input": {"placeholder": "Ask a question", "persistHistory": True},
+        "file_upload": {"accept": ".pdf,.docx,.txt,.csv,.json", "multiple": False, "defaultLocalPaths": "storage/sample_full_stack_document_ops.txt"},
+        "text_extraction": {"strategy": "auto"},
+        "query_rewriter": {"domainHint": "document policy evidence"},
+        "rag_knowledge": {"ingestMode": "ingest_and_retrieve", "collection": "autobuilt-knowledge", "chunkSize": 600, "overlap": 100, "topK": 5, "tags": "autobuilt", "allowedFileTypes": ".pdf,.docx,.txt,.csv,.json"},
+        "re_ranker": {"strategy": "score_then_length", "topK": 5},
+        "chatbot": {"model": settings.openrouter_model, "systemPrompt": "Answer using provided evidence. Cite sources and avoid guessing.", "answerStyle": "conversational", "temperature": 0.2},
+        "citation_verifier": {"minimumSupport": 0.35},
+        "chat_output": {"stream": True},
+        "dashboard_preview": {"view": "auto"},
+    }
+    return defaults.get(block_type, {})
+
+
+def graph_edge(source: str, source_port: str, target: str, target_port: str, label: str) -> dict:
+    return {
+        "id": f"edge-{source}-{source_port}-{target}-{target_port}",
+        "source": source,
+        "sourceHandle": f"out:{source_port}",
+        "target": target,
+        "targetHandle": f"in:{target_port}",
+        "label": label,
+    }
+
+
+def build_autobuild_graph(name: str, prompt: str) -> dict:
+    wants_web = "web" in prompt.lower() or "search" in prompt.lower()
+    nodes = [
+        block_node("file_upload", "file_upload-1", 80, 260),
+        block_node("text_extraction", "text_extraction-1", 390, 260),
+        block_node("chat_input", "chat_input-1", 80, 560),
+        block_node("query_rewriter", "query_rewriter-1", 390, 560),
+        block_node("rag_knowledge", "rag_knowledge-1", 710, 330),
+        block_node("re_ranker", "re_ranker-1", 1030, 330),
+        block_node("chatbot", "chatbot-1", 1350, 330),
+        block_node("citation_verifier", "citation_verifier-1", 1670, 330),
+        block_node("chat_output", "chat_output-1", 1990, 250),
+        block_node("dashboard_preview", "dashboard_preview-1", 1990, 460),
+    ]
+    edges = [
+        graph_edge("file_upload-1", "file", "text_extraction-1", "file", "extract file"),
+        graph_edge("text_extraction-1", "document", "rag_knowledge-1", "document", "ingest docs"),
+        graph_edge("chat_input-1", "message", "query_rewriter-1", "query", "rewrite query"),
+        graph_edge("query_rewriter-1", "query", "rag_knowledge-1", "query", "better query"),
+        graph_edge("rag_knowledge-1", "knowledge", "re_ranker-1", "knowledge", "rerank"),
+        graph_edge("chat_input-1", "message", "chatbot-1", "message", "question"),
+        graph_edge("re_ranker-1", "knowledge", "chatbot-1", "context", "evidence"),
+        graph_edge("chatbot-1", "reply", "citation_verifier-1", "answer", "verify"),
+        graph_edge("re_ranker-1", "knowledge", "citation_verifier-1", "sources", "sources"),
+        graph_edge("chatbot-1", "reply", "chat_output-1", "message", "answer"),
+        graph_edge("citation_verifier-1", "verification", "dashboard_preview-1", "content", "verification"),
+    ]
+    if wants_web:
+        nodes.insert(4, block_node("web_search", "web_search-1", 710, 620, {"provider": "local-placeholder", "topK": 3}))
+        edges.append(graph_edge("query_rewriter-1", "query", "web_search-1", "query", "web context"))
+    return {"id": f"autobuilt-{int(datetime.now(timezone.utc).timestamp())}", "name": name, "version": 1, "nodes": nodes, "edges": edges}
 
 
 @router.get("/health", tags=["system"])
@@ -302,6 +512,8 @@ def system_health_details() -> dict:
             "embedding_provider": settings.embedding_provider,
             "embedding_model": settings.embedding_model,
             "vector_backend": settings.vector_backend,
+            "telemetry_enabled": str(settings.telemetry_enabled),
+            "telemetry_service_name": settings.telemetry_service_name,
         },
     }
 
@@ -385,38 +597,107 @@ def usage_dashboard_route(db: Session = Depends(get_db)) -> dict:
     return get_usage_dashboard(db)
 
 
+@router.get("/admin/audit-logs", tags=["admin"])
+def audit_logs_route(
+    workflow_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit)
+    if workflow_id is not None:
+        statement = statement.where(AuditLog.workflow_id == workflow_id)
+    return [
+        {
+            "id": event.id,
+            "workflow_id": event.workflow_id,
+            "workflow_run_id": event.workflow_run_id,
+            "user_id": event.user_id,
+            "event_type": event.event_type,
+            "resource_type": event.resource_type,
+            "resource_id": event.resource_id,
+            "action": event.action,
+            "metadata": event.metadata_json,
+            "created_at": event.created_at,
+        }
+        for event in db.scalars(statement)
+    ]
+
+
+@router.get("/admin/observability", tags=["admin"])
+def observability_dashboard_route(db: Session = Depends(get_db)) -> dict:
+    return get_observability_dashboard(db)
+
+
 @router.post("/files/runtime-upload", tags=["files"])
 async def runtime_upload_route(file: UploadFile = File(...)) -> dict:
     return await persist_runtime_upload(file)
 
 
+def file_library_payload(file: UploadedFile) -> dict:
+    return {
+        "id": file.id,
+        "workflow_id": file.workflow_id,
+        "workflow_run_id": file.workflow_run_id,
+        "node_id": file.node_id,
+        "original_name": file.original_name,
+        "extension": file.extension,
+        "mime_type": file.mime_type,
+        "size_bytes": file.size_bytes,
+        "storage_path": file.storage_path,
+        "metadata": file.metadata_json,
+        "created_at": file.created_at,
+        "knowledge_document_count": len(file.knowledge_documents),
+    }
+
+
+@router.post("/files/library-upload", tags=["files"])
+async def library_upload_route(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    uploaded_file = await persist_library_upload(db, file)
+    audit_event(
+        db,
+        action="file_library_uploaded",
+        event_type="data_access",
+        user_id=current_user_id,
+        resource_type="uploaded_file",
+        resource_id=str(uploaded_file.id),
+        metadata={"original_name": uploaded_file.original_name, "extension": uploaded_file.extension},
+    )
+    db.commit()
+    db.refresh(uploaded_file)
+    return file_library_payload(uploaded_file)
+
+
 @router.get("/files", tags=["files"])
 def list_files_route(db: Session = Depends(get_db)) -> list[dict]:
     files = list(db.scalars(select(UploadedFile).order_by(UploadedFile.created_at.desc()).limit(200)))
-    return [
-        {
-            "id": file.id,
-            "workflow_id": file.workflow_id,
-            "workflow_run_id": file.workflow_run_id,
-            "node_id": file.node_id,
-            "original_name": file.original_name,
-            "extension": file.extension,
-            "mime_type": file.mime_type,
-            "size_bytes": file.size_bytes,
-            "storage_path": file.storage_path,
-            "metadata": file.metadata_json,
-            "created_at": file.created_at,
-            "knowledge_document_count": len(file.knowledge_documents),
-        }
-        for file in files
-    ]
+    return [file_library_payload(file) for file in files]
 
 
 @router.get("/files/{file_id}", tags=["files"])
-def get_file_route(file_id: int, db: Session = Depends(get_db)) -> dict:
+def get_file_route(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
     file = db.get(UploadedFile, file_id)
     if file is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
+    audit_event(
+        db,
+        action="file_previewed",
+        event_type="data_access",
+        workflow_id=file.workflow_id,
+        workflow_run_id=file.workflow_run_id,
+        user_id=current_user_id,
+        resource_type="uploaded_file",
+        resource_id=str(file.id),
+        metadata={"original_name": file.original_name, "extension": file.extension},
+    )
+    db.commit()
     preview = ""
     try:
         with open(file.storage_path, "r", encoding="utf-8", errors="ignore") as handle:
@@ -539,6 +820,27 @@ def import_workflow_bundle_route(
     return WorkflowRead.model_validate(workflow)
 
 
+@router.post("/workflows/autobuild", response_model=WorkflowRead, status_code=status.HTTP_201_CREATED, tags=["workflows"])
+def autobuild_workflow_route(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> WorkflowRead:
+    prompt = str(payload.get("prompt", "Build a document RAG chatbot"))
+    name = str(payload.get("name") or f"Auto-built: {prompt[:60]}").strip()
+    graph_json = build_autobuild_graph(name=name, prompt=prompt)
+    workflow = create_workflow(
+        db,
+        name=name,
+        description="Auto-built workflow generated from a natural language prompt.",
+        validated_graph=validate_graph(BuilderGraphPayload.model_validate(graph_json)),
+        user_id=current_user_id,
+    )
+    audit_event(db, action="autobuild_workflow", workflow_id=workflow.id, user_id=current_user_id, metadata={"prompt": prompt})
+    db.commit()
+    return WorkflowRead.model_validate(get_workflow_or_404(db, workflow.id))
+
+
 @router.get("/workflows/{workflow_id}", response_model=WorkflowRead, tags=["workflows"])
 def get_workflow_route(
     workflow_id: int,
@@ -557,6 +859,7 @@ def update_workflow_route(
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
     workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
+    before_graph = dict(workflow.graph_json or {})
     validated_graph = validate_graph(payload.graph)
     updated_workflow = update_workflow(
         db,
@@ -567,6 +870,18 @@ def update_workflow_route(
         validated_graph=validated_graph,
         user_id=current_user_id,
     )
+    db.add(
+        WorkflowChangeEvent(
+            workflow_id=updated_workflow.id,
+            user_id=current_user_id,
+            change_type="graph_update",
+            summary="Workflow graph updated.",
+            before_json=before_graph,
+            after_json=updated_workflow.graph_json,
+        )
+    )
+    audit_event(db, action="workflow_updated", workflow_id=updated_workflow.id, user_id=current_user_id)
+    db.commit()
     return WorkflowRead.model_validate(updated_workflow)
 
 
@@ -578,6 +893,7 @@ def update_workflow_metadata_route(
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
     workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
+    before_graph = dict(workflow.graph_json or {})
     if payload.name is not None:
         workflow.name = payload.name
         workflow.graph_json = {**workflow.graph_json, "name": payload.name}
@@ -587,6 +903,17 @@ def update_workflow_metadata_route(
         workflow.status = payload.status
     workflow.updated_by_user_id = current_user_id
     db.add(workflow)
+    db.add(
+        WorkflowChangeEvent(
+            workflow_id=workflow.id,
+            user_id=current_user_id,
+            change_type="metadata_update",
+            summary="Workflow metadata updated.",
+            before_json=before_graph,
+            after_json=workflow.graph_json,
+        )
+    )
+    audit_event(db, action="workflow_metadata_updated", workflow_id=workflow.id, user_id=current_user_id)
     db.commit()
     db.refresh(workflow)
     return WorkflowRead.model_validate(get_workflow_or_404(db, workflow_id))
@@ -691,6 +1018,8 @@ def save_workflow_version_route(
         version_note=payload.version_note,
         validated_graph=validated_graph,
     )
+    audit_event(db, action="workflow_version_saved", workflow_id=workflow_id, user_id=current_user_id, metadata={"version_number": version.version_number})
+    db.commit()
     return WorkflowVersionRead.model_validate(version)
 
 
@@ -722,6 +1051,7 @@ def restore_workflow_version_route(
 def compare_workflow_version_route(
     workflow_id: int,
     version_id: int,
+    base: str = Query(default="previous", pattern="^(previous|current)$"),
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> dict:
@@ -729,12 +1059,28 @@ def compare_workflow_version_route(
     version = db.get(WorkflowVersion, version_id)
     if version is None or version.workflow_id != workflow_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found.")
+    previous_version = None
+    if base == "previous":
+        previous_version = db.scalar(
+            select(WorkflowVersion)
+            .where(
+                WorkflowVersion.workflow_id == workflow_id,
+                WorkflowVersion.version_number < version.version_number,
+            )
+            .order_by(WorkflowVersion.version_number.desc())
+            .limit(1)
+        )
+    comparison_graph = previous_version.graph_json if previous_version else workflow.graph_json
+    comparison_label = f"version {previous_version.version_number}" if previous_version else "current graph"
     return {
         "workflow_id": workflow.id,
         "version_id": version.id,
         "version_number": version.version_number,
         "current_version": workflow.current_version,
-        "diff": compare_graphs(workflow.graph_json, version.graph_json),
+        "comparison_base": "previous_version" if previous_version else "current_graph",
+        "comparison_label": comparison_label,
+        "base_version_number": previous_version.version_number if previous_version else None,
+        "diff": compare_graphs(version.graph_json, comparison_graph),
     }
 
 
@@ -818,6 +1164,139 @@ def delete_workflow_permission_route(
     return {"deleted": True, "permission_id": permission_id}
 
 
+@router.get("/workflows/{workflow_id}/comments", tags=["collaboration"])
+def list_workflow_comments_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+    comments = db.scalars(select(WorkflowComment).where(WorkflowComment.workflow_id == workflow_id).order_by(WorkflowComment.created_at.desc()))
+    return [
+        {"id": item.id, "workflow_id": item.workflow_id, "node_id": item.node_id, "user_id": item.user_id, "body": item.body, "metadata": item.metadata_json, "created_at": item.created_at}
+        for item in comments
+    ]
+
+
+@router.post("/workflows/{workflow_id}/comments", status_code=status.HTTP_201_CREATED, tags=["collaboration"])
+def create_workflow_comment_route(
+    workflow_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+    comment = WorkflowComment(
+        workflow_id=workflow_id,
+        user_id=current_user_id,
+        node_id=payload.get("node_id"),
+        body=str(payload.get("body", "")).strip(),
+        metadata_json=dict(payload.get("metadata", {})),
+    )
+    if not comment.body:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Comment body is required.")
+    db.add(comment)
+    audit_event(db, action="comment_created", workflow_id=workflow_id, user_id=current_user_id, resource_type="comment", metadata={"node_id": comment.node_id})
+    db.commit()
+    db.refresh(comment)
+    return {"id": comment.id, "workflow_id": comment.workflow_id, "node_id": comment.node_id, "body": comment.body, "created_at": comment.created_at}
+
+
+@router.get("/workflows/{workflow_id}/history", tags=["collaboration"])
+def workflow_history_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+    events = db.scalars(select(WorkflowChangeEvent).where(WorkflowChangeEvent.workflow_id == workflow_id).order_by(WorkflowChangeEvent.created_at.desc()).limit(100))
+    return [
+        {"id": event.id, "workflow_id": event.workflow_id, "user_id": event.user_id, "change_type": event.change_type, "summary": event.summary, "before": event.before_json, "after": event.after_json, "created_at": event.created_at}
+        for event in events
+    ]
+
+
+@router.get("/subflows", tags=["collaboration"])
+def list_subflows_route(db: Session = Depends(get_db)) -> list[dict]:
+    return [
+        {"id": subflow.id, "workflow_id": subflow.workflow_id, "name": subflow.name, "description": subflow.description, "graph_json": subflow.graph_json, "created_at": subflow.created_at}
+        for subflow in db.scalars(select(WorkflowSubflow).order_by(WorkflowSubflow.created_at.desc()).limit(100))
+    ]
+
+
+@router.post("/workflows/{workflow_id}/subflows", status_code=status.HTTP_201_CREATED, tags=["collaboration"])
+def create_subflow_route(
+    workflow_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="editor")
+    subflow = WorkflowSubflow(
+        workflow_id=workflow_id,
+        created_by_user_id=current_user_id,
+        name=str(payload.get("name", "Reusable Subflow")),
+        description=payload.get("description"),
+        graph_json=dict(payload.get("graph_json", {})),
+    )
+    db.add(subflow)
+    audit_event(db, action="subflow_created", workflow_id=workflow_id, user_id=current_user_id, resource_type="subflow", metadata={"name": subflow.name})
+    db.commit()
+    db.refresh(subflow)
+    return {"id": subflow.id, "name": subflow.name, "workflow_id": subflow.workflow_id, "created_at": subflow.created_at}
+
+
+@router.post("/workflows/{workflow_id}/nodes/{node_id}/test", tags=["execution"])
+def test_workflow_node_route(
+    workflow_id: int,
+    node_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    node = next((item for item in workflow.graph_json.get("nodes", []) if item.get("id") == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Node not found.")
+    test_run = WorkflowRun(
+        workflow_id=workflow.id,
+        status="running",
+        trigger_mode="block_test",
+        owner_user_id=current_user_id,
+        graph_version=workflow.current_version,
+        graph_snapshot=workflow.graph_json,
+        input_payload=payload,
+        output_payload={},
+        preview_payload={},
+        log_messages=[],
+    )
+    db.add(test_run)
+    db.flush()
+    node_inputs: dict[str, dict[str, list[TypedPayload]]] = {node_id: {}}
+    for port, value in dict(payload.get("inputs", {})).items():
+        node_inputs[node_id][port] = [typed_payload("any", value, value)]
+    context = ExecutionContext(
+        session=db,
+        workflow=workflow,
+        workflow_run=test_run,
+        runtime_inputs={},
+        node_inputs=node_inputs,
+        node_outputs={},
+        memory_store={},
+        run_logs=[],
+        uploaded_files_by_node=defaultdict(list),
+    )
+    result = execute_node(node, context)
+    test_run.status = "completed"
+    test_run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    test_run.output_payload = {name: output.to_dict() for name, output in result.outputs.items()}
+    test_run.preview_payload = result.preview
+    test_run.log_messages = result.logs
+    audit_event(db, action="node_tested", workflow_id=workflow_id, workflow_run_id=test_run.id, user_id=current_user_id, resource_type="node", resource_id=node_id)
+    db.commit()
+    return {"run_id": test_run.id, "node_id": node_id, "outputs": test_run.output_payload, "preview": test_run.preview_payload, "logs": test_run.log_messages}
+
+
 @router.get("/workflows/{workflow_id}/bundle", tags=["workflows"])
 def export_workflow_bundle_route(workflow_id: int, db: Session = Depends(get_db)) -> dict:
     workflow = get_workflow_or_404(db, workflow_id)
@@ -896,6 +1375,15 @@ def execute_workflow_route(
 ) -> WorkflowRunRead:
     get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
     workflow_run = execute_workflow(db, workflow_id, payload, owner_user_id=current_user_id)
+    audit_event(
+        db,
+        action="workflow_executed",
+        workflow_id=workflow_id,
+        workflow_run_id=workflow_run.id,
+        user_id=current_user_id,
+        metadata={"trigger_mode": payload.trigger_mode},
+    )
+    db.commit()
     return WorkflowRunRead.model_validate(workflow_run)
 
 
@@ -908,6 +1396,15 @@ def execute_workflow_async_route(
 ) -> dict:
     get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
     queued = enqueue_workflow_execution(workflow_id, payload, owner_user_id=current_user_id)
+    audit_event(
+        db,
+        action="workflow_execution_queued",
+        workflow_id=workflow_id,
+        workflow_run_id=queued.run_id,
+        user_id=current_user_id,
+        metadata={"trigger_mode": payload.trigger_mode},
+    )
+    db.commit()
     return {
         "workflow_id": queued.workflow_id,
         "run_id": queued.run_id,
@@ -1005,9 +1502,31 @@ def list_knowledge_collections_route(
             "collection_name": row[0],
             "document_count": row[1],
             "chunk_count": row[2],
+            "diagnostics": build_collection_diagnostics(db, workflow_id, row[0]),
         }
         for row in rows
     ]
+
+
+@router.get("/workflows/{workflow_id}/knowledge/collections/{collection_name}/diagnostics", tags=["knowledge"])
+def collection_diagnostics_route(
+    workflow_id: int,
+    collection_name: str,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+    audit_event(
+        db,
+        action="rag_diagnostics_viewed",
+        event_type="data_access",
+        workflow_id=workflow_id,
+        user_id=current_user_id,
+        resource_type="rag_collection",
+        resource_id=collection_name,
+    )
+    db.commit()
+    return build_collection_diagnostics(db, workflow_id, collection_name)
 
 
 @router.get("/workflows/{workflow_id}/knowledge/collections/{collection_name}/documents", tags=["knowledge"])
@@ -1018,6 +1537,16 @@ def list_collection_documents_route(
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> list[dict]:
     get_authorized_workflow(db, workflow_id, current_user_id)
+    audit_event(
+        db,
+        action="rag_documents_listed",
+        event_type="data_access",
+        workflow_id=workflow_id,
+        user_id=current_user_id,
+        resource_type="rag_collection",
+        resource_id=collection_name,
+    )
+    db.commit()
     documents = list(
         db.scalars(
             select(KnowledgeDocument)
@@ -1053,6 +1582,17 @@ def list_document_chunks_route(
     document = db.get(KnowledgeDocument, document_id)
     if document is None or document.workflow_id != workflow_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge document not found.")
+    audit_event(
+        db,
+        action="rag_chunks_viewed",
+        event_type="data_access",
+        workflow_id=workflow_id,
+        user_id=current_user_id,
+        resource_type="knowledge_document",
+        resource_id=str(document.id),
+        metadata={"collection_name": document.collection_name, "title": document.title},
+    )
+    db.commit()
     return [
         {
             "id": chunk.id,
@@ -1086,6 +1626,17 @@ def test_collection_retrieval_route(
         }
     )
     chunks = retrieve_relevant_chunks(db, workflow=workflow, rag_config=rag_config, query=query)
+    audit_event(
+        db,
+        action="rag_retrieval_tested",
+        event_type="data_access",
+        workflow_id=workflow_id,
+        user_id=current_user_id,
+        resource_type="rag_collection",
+        resource_id=collection_name,
+        metadata={"query": query, "top_k": top_k, "match_count": len(chunks)},
+    )
+    db.commit()
     return {
         "query": query,
         "collection_name": collection_name,
@@ -1102,6 +1653,94 @@ def test_collection_retrieval_route(
             for chunk in chunks
         ],
     }
+
+
+@router.post("/workflows/{workflow_id}/knowledge/collections/{collection_name}/evaluate", tags=["knowledge"])
+def evaluate_collection_route(
+    workflow_id: int,
+    collection_name: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    query = str(payload.get("query", "")).strip()
+    if not query:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query is required.")
+    expected_answer = payload.get("expected_answer")
+    top_k = int(payload.get("top_k", 4))
+    rag_config = build_rag_config({"collection": collection_name, "topK": top_k})
+    chunks = retrieve_relevant_chunks(db, workflow=workflow, rag_config=rag_config, query=query)
+    matches = [
+        {
+            "chunk_id": chunk.chunk_id,
+            "score": chunk.score,
+            "relevance": score_to_relevance(chunk.score),
+            "text": chunk.text,
+            "metadata": chunk.metadata,
+        }
+        for chunk in chunks
+    ]
+    evaluation = evaluate_rag_result(
+        db,
+        workflow_id=workflow_id,
+        collection_name=collection_name,
+        query=query,
+        expected_answer=str(expected_answer) if expected_answer else None,
+        matches=matches,
+    )
+    audit_event(
+        db,
+        action="rag_evaluated",
+        workflow_id=workflow_id,
+        user_id=current_user_id,
+        resource_type="rag_collection",
+        resource_id=collection_name,
+        metadata={"query": query, "retrieval_score": evaluation.retrieval_score},
+    )
+    db.commit()
+    db.refresh(evaluation)
+    return {
+        "id": evaluation.id,
+        "collection_name": collection_name,
+        "query": query,
+        "expected_answer": evaluation.expected_answer,
+        "retrieval_score": evaluation.retrieval_score,
+        "hallucination_risk": evaluation.hallucination_risk,
+        "matches": matches,
+        "result": evaluation.result_json,
+        "created_at": evaluation.created_at,
+    }
+
+
+@router.get("/workflows/{workflow_id}/knowledge/evaluations", tags=["knowledge"])
+def list_rag_evaluations_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+    evaluations = list(
+        db.scalars(
+            select(RagEvaluation)
+            .where(RagEvaluation.workflow_id == workflow_id)
+            .order_by(RagEvaluation.created_at.desc())
+            .limit(100)
+        )
+    )
+    return [
+        {
+            "id": evaluation.id,
+            "collection_name": evaluation.collection_name,
+            "query": evaluation.query,
+            "expected_answer": evaluation.expected_answer,
+            "retrieval_score": evaluation.retrieval_score,
+            "hallucination_risk": evaluation.hallucination_risk,
+            "result": evaluation.result_json,
+            "created_at": evaluation.created_at,
+        }
+        for evaluation in evaluations
+    ]
 
 
 @router.delete("/workflows/{workflow_id}/knowledge/collections/{collection_name}", tags=["knowledge"])

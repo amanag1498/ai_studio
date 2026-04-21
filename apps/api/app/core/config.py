@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     vector_backend: str = "chromadb"
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
+    telemetry_enabled: bool = True
+    telemetry_service_name: str = "ai-studio-api"
 
     model_config = SettingsConfigDict(
         env_file=(REPO_ROOT / ".env", BASE_DIR / ".env"),

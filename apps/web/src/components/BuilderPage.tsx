@@ -40,14 +40,23 @@ import {
   serializeGraph,
 } from "../lib/builder";
 import {
+  autoBuildWorkflow,
   createWorkflow,
+  createWorkflowComment,
+  executeWorkflowAsync,
   executeWorkflow,
   getChatUrl,
+  getRunEventsUrl,
   getWorkflow,
+  getWorkflowRun,
+  listFiles,
   publishWorkflow,
+  saveWorkflowVersion,
+  testWorkflowNode,
   uploadRuntimeFile,
   updateWorkflow,
   type RuntimeUploadResponse,
+  type FileLibraryItem,
   type WorkflowRunRecord,
 } from "../lib/api";
 
@@ -156,6 +165,45 @@ function isChatWorkflow(graph: BuilderGraph) {
   return (
     graph.nodes.some((node) => node.data.blockType === "chat_input") &&
     graph.nodes.some((node) => node.data.blockType === "chat_output")
+  );
+}
+
+function normalizeGraphForChangeDetection(graph: BuilderGraph) {
+  return {
+    id: graph.id,
+    name: graph.name,
+    nodes: graph.nodes
+      .map((node) => ({
+        id: node.id,
+        type: node.type,
+        position: {
+          x: Math.round(Number(node.position?.x || 0)),
+          y: Math.round(Number(node.position?.y || 0)),
+        },
+        data: {
+          blockType: node.data.blockType,
+          label: node.data.label,
+          config: node.data.config,
+        },
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+    edges: graph.edges
+      .map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        sourceHandle: edge.sourceHandle || null,
+        target: edge.target,
+        targetHandle: edge.targetHandle || null,
+        label: edge.label || "",
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  };
+}
+
+function graphsHaveMeaningfulChanges(currentGraph: BuilderGraph, savedGraph: BuilderGraph) {
+  return (
+    JSON.stringify(normalizeGraphForChangeDetection(currentGraph)) !==
+    JSON.stringify(normalizeGraphForChangeDetection(savedGraph))
   );
 }
 
@@ -470,6 +518,25 @@ function getRunDisplayCards(workflowRun: WorkflowRunRecord | null, nodes: Node[]
   return cards;
 }
 
+function explainWorkflowRun(run: WorkflowRunRecord | null) {
+  if (!run) return "";
+  const nodeRuns = run.node_runs || [];
+  const completed = nodeRuns.filter((node) => node.status === "completed").length;
+  const failed = nodeRuns.filter((node) => node.status === "failed").length;
+  const blockTypes = nodeRuns.map((node) => node.block_type);
+  const parts = [
+    `${completed}/${nodeRuns.length || Object.keys(run.output_payload || {}).length} block(s) completed`,
+  ];
+  if (blockTypes.includes("file_upload")) parts.push("files were staged locally");
+  if (blockTypes.includes("text_extraction")) parts.push("text was extracted");
+  if (blockTypes.includes("rag_knowledge")) parts.push("knowledge was indexed/retrieved");
+  if (blockTypes.includes("chatbot")) parts.push("the chatbot generated an answer");
+  if (blockTypes.includes("citation_verifier")) parts.push("citations were checked");
+  if (failed) parts.push(`${failed} block(s) need attention`);
+  if (run.latency_ms) parts.push(`total latency ${run.latency_ms}ms`);
+  return parts.join(", ") + ".";
+}
+
 function summarizeFriendly(value: unknown) {
   if (!value) {
     return "Output ready";
@@ -495,6 +562,20 @@ function summarizeFriendly(value: unknown) {
   }
 
   return stringifyPreviewValue(value).slice(0, 180);
+}
+
+function getNodeRunPreview(workflowRun: WorkflowRunRecord | null, node: BuilderNode) {
+  const nodeRun = workflowRun?.node_runs?.find((run) => run.node_id === node.id);
+  if (!nodeRun) {
+    return undefined;
+  }
+  const outputSummary = summarizeFriendly(nodeRun.preview_payload || nodeRun.output_payload);
+  return {
+    status: nodeRun.status,
+    latencyMs: nodeRun.latency_ms,
+    summary: outputSummary,
+    error: nodeRun.error_message,
+  };
 }
 
 function getNodeStatusBadges(
@@ -545,8 +626,17 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const [nodeSearch, setNodeSearch] = useState("");
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<"config" | "runtime" | "test" | "fixes" | "run" | "tools">("config");
   const [isPreRunOpen, setIsPreRunOpen] = useState(false);
+  const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [versionNote, setVersionNote] = useState("");
+  const [autoBuildPrompt, setAutoBuildPrompt] = useState("Build a document upload workflow that extracts text, rewrites the question, searches RAG, reranks evidence, answers with citations, and outputs JSON.");
+  const [nodeTestInput, setNodeTestInput] = useState('{"message":"What should I know?","query":"work from home","document":{"text":"Remote work is available two days per week with manager approval.","metadata":{"source":"sample"}}}');
+  const [nodeTestResult, setNodeTestResult] = useState<Record<string, unknown> | null>(null);
+  const [promptPlaygroundInput, setPromptPlaygroundInput] = useState("Summarize the remote work policy and return action items.");
+  const [promptPlaygroundResult, setPromptPlaygroundResult] = useState<Record<string, unknown> | null>(null);
+  const [libraryFiles, setLibraryFiles] = useState<FileLibraryItem[]>([]);
   const [persistedWorkflowId, setPersistedWorkflowId] = useState<number | null>(() => {
     return workflowId ?? null;
   });
@@ -586,12 +676,21 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       data: {
         ...builderNode.data,
         statusBadges: getNodeStatusBadges(builderNode, edges as BuilderEdge[], runtimeInputs, lastRun),
+        runPreview: getNodeRunPreview(lastRun, builderNode),
       },
     };
   });
   const connectionSuggestions = selectedNode
     ? getConnectionSuggestions(selectedNode, nodes as BuilderNode[], edges as BuilderEdge[])
     : [];
+  const inspectorTabs = [
+    { id: "config", label: "Config", hint: "Schema settings" },
+    { id: "runtime", label: "Inputs", hint: "Files and values" },
+    { id: "test", label: "Test", hint: "Node previews" },
+    { id: "fixes", label: "Fix", hint: "Readiness and wiring" },
+    { id: "run", label: "Run", hint: "Execute and publish" },
+    { id: "tools", label: "Tools", hint: "RAG and auto-build" },
+  ] as const;
 
   function getLocalUser() {
     try {
@@ -646,6 +745,12 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
         setStatusMessage(message);
       });
   }, [workflowId]);
+
+  useEffect(() => {
+    listFiles()
+      .then((records) => setLibraryFiles(records.slice(0, 30)))
+      .catch(() => setLibraryFiles([]));
+  }, []);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -819,14 +924,29 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
 
     try {
       const workflow = await persistWorkflow(graph);
-      setStatusMessage(`Executing workflow ${workflow.id} against the local API.`);
-
-      const workflowRun = await executeWorkflow(workflow.id, {
+      const executionPayload = {
         trigger_mode: "manual",
         session_id: sessionId,
         user_id: userId,
         inputs: await buildExecuteInputs(graph),
-      });
+      };
+      setStatusMessage(`Starting live execution stream for workflow ${workflow.id}.`);
+
+      if (typeof EventSource !== "undefined") {
+        const queuedRun = await executeWorkflowAsync(workflow.id, executionPayload);
+        setStatusMessage(`Workflow ${workflow.id} queued as run #${queuedRun.run_id}. Streaming node updates...`);
+        const streamedRun = await waitForWorkflowRunEvents(workflow.id, queuedRun.run_id);
+        setLastRun(streamedRun);
+        setStatusMessage(
+          streamedRun.status === "completed"
+            ? `Workflow ${workflow.id} streamed successfully. Review the output preview below.`
+            : `Workflow ${workflow.id} finished with status ${streamedRun.status}.`,
+        );
+        return;
+      }
+
+      setStatusMessage(`Executing workflow ${workflow.id} against the local API.`);
+      const workflowRun = await executeWorkflow(workflow.id, executionPayload);
 
       setLastRun(workflowRun);
       setStatusMessage(
@@ -841,6 +961,60 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     } finally {
       setIsRunning(false);
     }
+  }
+
+  function waitForWorkflowRunEvents(workflowId: number, runId: number) {
+    return new Promise<WorkflowRunRecord>((resolve, reject) => {
+      const events = new EventSource(getRunEventsUrl(workflowId, runId));
+      let latestRun: WorkflowRunRecord | null = null;
+      let settled = false;
+
+      const close = () => {
+        settled = true;
+        events.close();
+      };
+
+      events.addEventListener("run_update", (event) => {
+        const run = JSON.parse((event as MessageEvent).data) as WorkflowRunRecord;
+        latestRun = run;
+        setLastRun(run);
+        setStatusMessage(`Run #${run.id}: ${run.status} · ${(run.node_runs || []).length} node update(s) received.`);
+      });
+
+      events.addEventListener("run_done", (event) => {
+        const run = JSON.parse((event as MessageEvent).data) as WorkflowRunRecord;
+        latestRun = run;
+        setLastRun(run);
+        close();
+        resolve(run);
+      });
+
+      events.onerror = () => {
+        if (settled) return;
+        close();
+        getWorkflowRun(workflowId, runId)
+          .then((run) => {
+            latestRun = run;
+            setLastRun(run);
+            if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
+              resolve(run);
+            } else {
+              reject(new Error("Live execution stream disconnected before the run finished."));
+            }
+          })
+          .catch(() => reject(new Error("Live execution stream disconnected.")));
+      };
+
+      window.setTimeout(() => {
+        if (settled) return;
+        close();
+        if (latestRun) {
+          resolve(latestRun);
+        } else {
+          reject(new Error("Live execution stream timed out before receiving updates."));
+        }
+      }, 600_000);
+    });
   }
 
   async function publishCurrentWorkflow() {
@@ -880,6 +1054,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       currentNodes.map((item) => ({ ...item, selected: item.id === node.id })),
     );
     setIsInspectorOpen(true);
+    setInspectorTab("config");
   }
 
   function onEdgesChange(changes: EdgeChange[]) {
@@ -1233,6 +1408,196 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     updateSelectedNodeField({ key: "schemaPrompt", label: "Schema", kind: "textarea", defaultValue: nextPrompt }, nextPrompt);
   }
 
+  function addFormInputField(fieldName: string) {
+    if (!selectedNode) return;
+    const current = String(selectedNode.data.config.fields || "name,email,message");
+    const parts = current.split(",").map((part) => part.trim()).filter(Boolean);
+    if (!parts.includes(fieldName)) {
+      updateSelectedNodeField({ key: "fields", label: "Fields", kind: "text", defaultValue: current }, [...parts, fieldName].join(","));
+    }
+  }
+
+  function getSelectedNodeFixes() {
+    if (!selectedNode) return [];
+    const fixes: string[] = [];
+    const incoming = edges.some((edge) => edge.target === selectedNode.id);
+    const outgoing = edges.some((edge) => edge.source === selectedNode.id);
+    if (selectedDefinition?.inputs.some((port) => port.required) && !incoming) {
+      fixes.push("Connect a compatible upstream block or test this node with sample input.");
+    }
+    if (selectedDefinition?.outputs.length && !outgoing && !["chat_output", "json_output", "dashboard_preview", "logger"].includes(selectedNode.data.blockType)) {
+      fixes.push("Connect this output to a downstream formatter, chatbot, logger, or preview block.");
+    }
+    if (selectedNode.data.blockType === "rag_knowledge") {
+      fixes.push("Use a real collection from Knowledge, then run ingest before retrieval testing.");
+    }
+    if (selectedNode.data.blockType === "file_upload") {
+      fixes.push("Attach files in Runtime Inputs or this inspector before running.");
+    }
+    return fixes.length ? fixes : ["This node looks configured. Use Block Test to verify its output contract."];
+  }
+
+  function applySelectedNodeFix(kind: "chat_output" | "document_preview" | "rag_chatbot" | "file_document_ai") {
+    if (!selectedNode) return;
+    const baseX = selectedNode.position.x + 330;
+    const baseY = selectedNode.position.y;
+
+    if (kind === "file_document_ai" && selectedNode.data.blockType === "file_upload") {
+      expandSelectedFileUploadToDocumentAi();
+      return;
+    }
+
+    if (kind === "chat_output") {
+      const outputDefinition = getBlockDefinition("chat_output");
+      if (!outputDefinition) return;
+      const outputNode = createNodeFromDefinition(outputDefinition, { x: baseX, y: baseY }, `${Date.now()}`);
+      setNodes((current) => current.concat(outputNode as Node));
+      setEdges((current) =>
+        current.concat({
+          id: `edge-${selectedNode.id}-reply-${outputNode.id}-message`,
+          source: selectedNode.id,
+          sourceHandle: `out:${selectedNode.data.outputs.find((port) => port.id === "reply") ? "reply" : selectedNode.data.outputs[0]?.id || "result"}`,
+          target: outputNode.id,
+          targetHandle: "in:message",
+          label: "answer",
+        }),
+      );
+      setStatusMessage("Added Chat Output and connected the selected node.");
+      return;
+    }
+
+    if (kind === "document_preview") {
+      const previewDefinition = getBlockDefinition("dashboard_preview");
+      const jsonDefinition = getBlockDefinition("json_output");
+      if (!previewDefinition || !jsonDefinition) return;
+      const previewNode = createNodeFromDefinition(previewDefinition, { x: baseX, y: baseY - 80 }, `${Date.now()}-preview`);
+      const jsonNode = createNodeFromDefinition(jsonDefinition, { x: baseX, y: baseY + 120 }, `${Date.now()}-json`);
+      const sourcePort = selectedNode.data.outputs.find((port) => ["document", "text", "json", "knowledge", "merged"].includes(port.id))?.id || selectedNode.data.outputs[0]?.id || "result";
+      setNodes((current) => current.concat(previewNode as Node, jsonNode as Node));
+      setEdges((current) =>
+        current.concat(
+          {
+            id: `edge-${selectedNode.id}-${sourcePort}-${previewNode.id}-content`,
+            source: selectedNode.id,
+            sourceHandle: `out:${sourcePort}`,
+            target: previewNode.id,
+            targetHandle: "in:content",
+            label: "preview",
+          },
+          {
+            id: `edge-${selectedNode.id}-${sourcePort}-${jsonNode.id}-payload`,
+            source: selectedNode.id,
+            sourceHandle: `out:${sourcePort}`,
+            target: jsonNode.id,
+            targetHandle: "in:payload",
+            label: "json",
+          },
+        ),
+      );
+      setStatusMessage("Added Dashboard Preview and JSON Output for the selected node.");
+      return;
+    }
+
+    if (kind === "rag_chatbot") {
+      const chatbotDefinition = getBlockDefinition("chatbot");
+      const outputDefinition = getBlockDefinition("chat_output");
+      if (!chatbotDefinition || !outputDefinition) return;
+      const chatbotNode = createNodeFromDefinition(chatbotDefinition, { x: baseX, y: baseY }, `${Date.now()}-chatbot`);
+      const outputNode = createNodeFromDefinition(outputDefinition, { x: baseX + 330, y: baseY }, `${Date.now()}-output`);
+      setNodes((current) => current.concat(chatbotNode as Node, outputNode as Node));
+      setEdges((current) =>
+        current.concat(
+          {
+            id: `edge-${selectedNode.id}-knowledge-${chatbotNode.id}-context`,
+            source: selectedNode.id,
+            sourceHandle: "out:knowledge",
+            target: chatbotNode.id,
+            targetHandle: "in:context",
+            label: "context",
+          },
+          {
+            id: `edge-${chatbotNode.id}-reply-${outputNode.id}-message`,
+            source: chatbotNode.id,
+            sourceHandle: "out:reply",
+            target: outputNode.id,
+            targetHandle: "in:message",
+            label: "answer",
+          },
+        ),
+      );
+      setStatusMessage("Added Chatbot and Chat Output after RAG Knowledge.");
+    }
+  }
+
+  async function autoBuildFromPrompt() {
+    if (!autoBuildPrompt.trim()) {
+      setStatusMessage("Describe the workflow you want AI Studio to build.");
+      return;
+    }
+    setIsRunning(true);
+    setStatusMessage("Auto-building a graph from your prompt.");
+    try {
+      const workflow = await autoBuildWorkflow({ prompt: autoBuildPrompt });
+      setGraph(workflow.graph_json);
+      setPersistedWorkflowId(workflow.id);
+      localStorage.setItem(BUILDER_WORKFLOW_ID_STORAGE_KEY, String(workflow.id));
+      setIsPaletteOpen(false);
+      setIsInspectorOpen(true);
+      setStatusMessage(`Auto-built workflow ${workflow.id}: ${workflow.name}.`);
+      setTimeout(() => zoomToFit(), 50);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Auto-build failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  async function testSelectedNode(inputOverride?: Record<string, unknown>) {
+    if (!selectedNode) return null;
+    let parsedInput: Record<string, unknown>;
+    if (inputOverride) {
+      parsedInput = inputOverride;
+    } else {
+      try {
+        parsedInput = JSON.parse(nodeTestInput) as Record<string, unknown>;
+      } catch {
+        setStatusMessage("Block test input must be valid JSON.");
+        return null;
+      }
+    }
+    setIsRunning(true);
+    setNodeTestResult(null);
+    try {
+      const graph = toBuilderGraph(nodes, edges);
+      const workflow = await persistWorkflow(graph);
+      const result = await testWorkflowNode(workflow.id, selectedNode.id, { inputs: parsedInput });
+      setNodeTestResult(result as unknown as Record<string, unknown>);
+      setStatusMessage(`${selectedNode.data.label} tested successfully.`);
+      return result as unknown as Record<string, unknown>;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Block test failed.";
+      setStatusMessage(message);
+      setNodeTestResult({ error: message });
+      return { error: message };
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  async function runPromptPlayground() {
+    if (!selectedNode) return;
+    const playgroundInputs =
+      selectedNode.data.blockType === "chatbot"
+        ? { message: promptPlaygroundInput, context: { matches: [{ snippet: "Remote work is allowed two days per week with manager approval.", metadata: { source: "sample policy" } }] } }
+        : selectedNode.data.blockType === "summarizer"
+          ? { content: promptPlaygroundInput }
+          : selectedNode.data.blockType === "extraction_ai"
+            ? { content: promptPlaygroundInput }
+            : { content: promptPlaygroundInput, message: promptPlaygroundInput };
+    const result = await testSelectedNode(playgroundInputs);
+    setPromptPlaygroundResult(result);
+  }
+
   function updateSelectedNodeLabel(label: string) {
     if (!selectedNode) {
       return;
@@ -1311,6 +1676,29 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     }
   }
 
+  function useLibraryFile(nodeId: string, file: FileLibraryItem) {
+    const uploadedFile: RuntimeUploadResponse = {
+      original_name: file.original_name,
+      stored_name: file.storage_path.split("/").pop() || file.original_name,
+      extension: file.extension,
+      mime_type: file.mime_type,
+      size_bytes: file.size_bytes,
+      storage_path: file.storage_path,
+      relative_storage_path: file.storage_path,
+    };
+    setRuntimeInputs((current) => ({
+      ...current,
+      [nodeId]: {
+        ...getRuntimeInputState(current, nodeId),
+        files: [],
+        uploadedFiles: [uploadedFile],
+        uploadStatus: "ready",
+        uploadError: undefined,
+      },
+    }));
+    setStatusMessage(`${file.original_name} selected from File Library.`);
+  }
+
   function getNodeField(node: BuilderNode, key: string) {
     return node.data.config[key];
   }
@@ -1366,10 +1754,69 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     reactFlowInstance?.setCenter(match.position.x + 140, match.position.y + 80, { zoom: 1, duration: 350 });
   }
 
-  function saveGraph() {
+  async function hasUnsavedGraphChanges(graph: BuilderGraph) {
+    if (!persistedWorkflowId) {
+      return true;
+    }
+
+    try {
+      const savedWorkflow = await getWorkflow(persistedWorkflowId);
+      return graphsHaveMeaningfulChanges(graph, savedWorkflow.graph_json);
+    } catch {
+      return true;
+    }
+  }
+
+  async function openSaveDialog() {
     const graph = toBuilderGraph(nodes, edges);
+    const hasChanges = await hasUnsavedGraphChanges(graph);
+    if (!hasChanges) {
+      setStatusMessage("No workflow changes detected. Make a graph/config change before saving a new version.");
+      return;
+    }
+    setVersionNote(`Saved from builder on ${new Date().toLocaleString()}`);
+    setIsSaveDialogOpen(true);
+  }
+
+  async function saveGraph(noteOverride?: string) {
+    const note = (noteOverride ?? versionNote).trim();
+    if (!note) {
+      setStatusMessage("Add a short save comment so this version is reviewable.");
+      return;
+    }
+    const graph = toBuilderGraph(nodes, edges);
+    const hasChanges = await hasUnsavedGraphChanges(graph);
+    if (!hasChanges) {
+      setIsSaveDialogOpen(false);
+      setStatusMessage("No workflow changes detected. Version was not saved.");
+      return;
+    }
     localStorage.setItem(BUILDER_GRAPH_STORAGE_KEY, serializeGraph(graph));
-    setStatusMessage("Graph saved to local storage.");
+    setStatusMessage("Saving graph and creating a workflow version.");
+
+    try {
+      const workflow = await persistWorkflow(graph);
+      const version = await saveWorkflowVersion(
+        workflow.id,
+        graph,
+        note,
+      );
+      try {
+        await createWorkflowComment(workflow.id, {
+          body: `Version ${version.version_number}: ${note}`,
+        });
+      } catch {
+        // Version saving should not fail just because the activity comment could not be mirrored.
+      }
+      setGraph(version.graph_json);
+      setPersistedWorkflowId(workflow.id);
+      localStorage.setItem(BUILDER_WORKFLOW_ID_STORAGE_KEY, String(workflow.id));
+      localStorage.setItem(BUILDER_GRAPH_STORAGE_KEY, serializeGraph(version.graph_json));
+      setIsSaveDialogOpen(false);
+      setStatusMessage(`Workflow saved as version ${version.version_number}.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not save workflow version.");
+    }
   }
 
   function loadGraph() {
@@ -1538,7 +1985,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
           <div className="h-full overflow-hidden rounded-[1.7rem] border border-white/70 bg-white/58 shadow-panel backdrop-blur">
             <div className="pointer-events-none absolute right-6 top-5 z-10 hidden lg:block">
               <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-full border border-ink/10 bg-white/90 px-3 py-2 shadow-panel backdrop-blur">
-                <button type="button" onClick={saveGraph} className="rounded-full bg-ink px-3 py-1.5 text-[11px] font-semibold text-white">Save</button>
+                <button type="button" onClick={() => void openSaveDialog()} className="rounded-full bg-ink px-3 py-1.5 text-[11px] font-semibold text-white">Save</button>
                 <button type="button" onClick={loadGraph} className="rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">Load</button>
                 <button type="button" onClick={resetGraph} className="rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">Reset</button>
                 <button type="button" onClick={startRunWorkflow} disabled={isRunning} className="rounded-full bg-lime px-3 py-2 text-xs font-bold text-ink disabled:opacity-60">
@@ -1601,18 +2048,43 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
             </div>
           </div>
 
-          <aside className={`absolute bottom-4 right-4 top-4 z-40 w-[min(400px,calc(100vw-2rem))] overflow-auto rounded-[1.35rem] border border-white/70 bg-white/92 p-3 shadow-panel backdrop-blur transition-transform duration-300 ${isInspectorOpen ? "translate-x-0" : "translate-x-[115%]"}`}>
-            <div className="sticky top-0 z-10 mb-4 flex items-start justify-between gap-3 rounded-[1.2rem] bg-white/95 p-3 backdrop-blur">
-              <div>
-                <h2 className="text-lg font-semibold">Configure & Run</h2>
-                <p className="mt-1 text-xs leading-5 text-ink/65">
-                  Node settings, runtime inputs, runs, publish, and RAG tools.
-                </p>
+          <aside className={`absolute bottom-4 right-4 top-4 z-40 flex w-[min(420px,calc(100vw-2rem))] flex-col overflow-hidden rounded-[1.55rem] border border-white/70 bg-white/94 shadow-panel backdrop-blur transition-transform duration-300 ${isInspectorOpen ? "translate-x-0" : "translate-x-[115%]"}`}>
+            <div className="border-b border-ink/8 bg-white/95 p-3 backdrop-blur">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-ink/38">
+                    Builder Inspector
+                  </p>
+                  <h2 className="mt-1 text-lg font-semibold">
+                    {selectedDefinition?.title ?? "Workflow Control"}
+                  </h2>
+                  <p className="mt-1 text-xs leading-5 text-ink/58">
+                    {inspectorTabs.find((tab) => tab.id === inspectorTab)?.hint}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setIsInspectorOpen(false)} className="rounded-full bg-mist px-3 py-2 text-xs font-semibold">
+                  Close
+                </button>
               </div>
-              <button type="button" onClick={() => setIsInspectorOpen(false)} className="rounded-full bg-mist px-3 py-2 text-xs font-semibold">
-                Close
-              </button>
+              <div className="mt-3 grid grid-cols-3 gap-1 rounded-[1.1rem] bg-mist/75 p-1">
+                {inspectorTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setInspectorTab(tab.id)}
+                    className={`rounded-[0.85rem] px-2.5 py-2 text-[11px] font-bold transition ${
+                      inspectorTab === tab.id
+                        ? "bg-ink text-white shadow-sm"
+                        : "text-ink/58 hover:bg-white/75 hover:text-ink"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
             </div>
+
+            <div className="min-h-0 flex-1 overflow-auto p-3">
 
             {selectedNode && selectedDefinition ? (
               <div className="space-y-5">
@@ -1636,7 +2108,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </p>
                 </div>
 
-                <div className="rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
+                <div className={`rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "config" ? "" : "hidden"}`}>
                   <p className="text-sm font-semibold text-ink">How This Block Becomes Useful</p>
                   <div className="mt-3 space-y-2">
                     {getBlockGuide(selectedNode.data.blockType).map((item) => (
@@ -1647,7 +2119,63 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 </div>
 
-                {selectedNode.data.blockType === "file_upload" ? (
+                <div className={`rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "test" ? "" : "hidden"}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">Block Test</p>
+                      <p className="mt-1 text-xs leading-5 text-ink/55">Run only this node with sample JSON to verify outputs before wiring the full workflow.</p>
+                    </div>
+                    <button type="button" onClick={() => void testSelectedNode()} disabled={isRunning} className="rounded-full bg-ink px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+                      Test
+                    </button>
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={nodeTestInput}
+                    onChange={(event) => setNodeTestInput(event.target.value)}
+                    className="mt-3 w-full rounded-2xl border border-ink/10 bg-mist/60 px-3 py-2 font-mono text-[11px] outline-none"
+                  />
+                  {nodeTestResult ? (
+                    <pre className="mt-3 max-h-44 overflow-auto rounded-2xl bg-ink p-3 text-[11px] leading-5 text-white/85">
+                      {JSON.stringify(nodeTestResult, null, 2)}
+                    </pre>
+                  ) : null}
+                </div>
+
+                <div className={`rounded-[1.6rem] bg-sand/45 p-4 ${inspectorTab === "fixes" ? "" : "hidden"}`}>
+                  <p className="text-sm font-semibold text-ink">Suggested Fixes</p>
+                  <div className="mt-3 space-y-2">
+                    {getSelectedNodeFixes().map((fix) => (
+                      <p key={fix} className="rounded-2xl bg-white/80 px-3 py-2 text-xs leading-5 text-ink/65">
+                        {fix}
+                      </p>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {selectedNode.data.blockType === "file_upload" ? (
+                      <button type="button" onClick={() => applySelectedNodeFix("file_document_ai")} className="rounded-full bg-ink px-3 py-2 text-xs font-semibold text-white">
+                        Add Extract + AI Chain
+                      </button>
+                    ) : null}
+                    {selectedNode.data.blockType === "rag_knowledge" ? (
+                      <button type="button" onClick={() => applySelectedNodeFix("rag_chatbot")} className="rounded-full bg-ink px-3 py-2 text-xs font-semibold text-white">
+                        Add RAG Chatbot
+                      </button>
+                    ) : null}
+                    {selectedNode.data.blockType === "chatbot" || selectedNode.data.outputs.some((port) => port.id === "reply") ? (
+                      <button type="button" onClick={() => applySelectedNodeFix("chat_output")} className="rounded-full bg-lime/50 px-3 py-2 text-xs font-semibold text-ink">
+                        Add Chat Output
+                      </button>
+                    ) : null}
+                    {selectedNode.data.outputs.length ? (
+                      <button type="button" onClick={() => applySelectedNodeFix("document_preview")} className="rounded-full bg-white px-3 py-2 text-xs font-semibold text-ink ring-1 ring-ink/8">
+                        Add Preview + JSON
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {selectedNode.data.blockType === "file_upload" && inspectorTab === "runtime" ? (
                   <div className="rounded-[1.6rem] border border-lime/40 bg-lime/20 p-4">
                     <p className="text-sm font-semibold text-ink">Attach Documents For This File Upload</p>
                     <p className="mt-1 text-xs leading-5 text-ink/62">
@@ -1691,6 +2219,24 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                         ))}
                       </div>
                     ) : null}
+                    {libraryFiles.length ? (
+                      <div className="mt-4 rounded-2xl bg-white/70 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-ink/45">Reuse From File Library</p>
+                        <div className="mt-2 max-h-44 space-y-2 overflow-auto">
+                          {libraryFiles.map((file) => (
+                            <button
+                              key={file.id}
+                              type="button"
+                              onClick={() => useLibraryFile(selectedNode.id, file)}
+                              className="flex w-full items-center justify-between gap-3 rounded-xl bg-mist/70 px-3 py-2 text-left text-xs font-semibold text-ink transition hover:bg-lime/30"
+                            >
+                              <span className="truncate">{file.original_name}</span>
+                              <span className="shrink-0 text-ink/45">{(file.size_bytes / 1024).toFixed(1)} KB</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       onClick={expandSelectedFileUploadToDocumentAi}
@@ -1708,7 +2254,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 ) : null}
 
-                {connectionSuggestions.length ? (
+                {connectionSuggestions.length && inspectorTab === "fixes" ? (
                   <div className="rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
                     <p className="text-sm font-semibold text-ink">One-Click Connections</p>
                     <p className="mt-1 text-xs leading-5 text-ink/58">
@@ -1736,7 +2282,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 ) : null}
 
-                <label className="block">
+                <label className={`block ${inspectorTab === "config" ? "" : "hidden"}`}>
                   <span className="mb-2 block text-sm font-semibold text-ink">Node Label</span>
                   <input
                     type="text"
@@ -1746,7 +2292,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   />
                 </label>
 
-                {selectedNode.data.blockType === "condition" ? (
+                {selectedNode.data.blockType === "condition" && inspectorTab === "config" ? (
                   <div className="rounded-[1.4rem] bg-mist/70 p-4">
                     <p className="text-sm font-semibold text-ink">Condition Builder</p>
                     <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1764,7 +2310,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 ) : null}
 
-                {selectedNode.data.blockType === "extraction_ai" ? (
+                {selectedNode.data.blockType === "extraction_ai" && inspectorTab === "config" ? (
                   <div className="rounded-[1.4rem] bg-mist/70 p-4">
                     <p className="text-sm font-semibold text-ink">Visual JSON Schema Editor</p>
                     <p className="mt-1 text-xs leading-5 text-ink/55">
@@ -1807,7 +2353,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 ) : null}
 
-                {selectedNode.data.blockType === "chatbot" ? (
+                {selectedNode.data.blockType === "chatbot" && inspectorTab === "config" ? (
                   <div className="rounded-[1.4rem] bg-mist/70 p-4">
                     <p className="text-sm font-semibold text-ink">Prompt Editor Helpers</p>
                     <div className="mt-3 grid gap-2">
@@ -1829,7 +2375,75 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 ) : null}
 
-                <div className="space-y-4">
+                {["chatbot", "summarizer", "extraction_ai", "classifier"].includes(selectedNode.data.blockType) && inspectorTab === "test" ? (
+                  <div className="rounded-[1.4rem] bg-white p-4 ring-1 ring-ink/6">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-ink">Prompt Playground</p>
+                        <p className="mt-1 text-xs leading-5 text-ink/55">
+                          Test this AI block with sample content before running the full workflow.
+                        </p>
+                      </div>
+                      <button type="button" onClick={() => void runPromptPlayground()} disabled={isRunning} className="rounded-full bg-ink px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+                        Run
+                      </button>
+                    </div>
+                    <textarea
+                      rows={4}
+                      value={promptPlaygroundInput}
+                      onChange={(event) => setPromptPlaygroundInput(event.target.value)}
+                      className="mt-3 w-full rounded-2xl border border-ink/10 bg-mist/60 px-3 py-2 text-sm outline-none"
+                    />
+                    {promptPlaygroundResult ? (
+                      <pre className="mt-3 max-h-56 overflow-auto rounded-2xl bg-ink p-3 text-[11px] leading-5 text-white/85">
+                        {JSON.stringify(promptPlaygroundResult, null, 2)}
+                      </pre>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {selectedNode.data.blockType === "prompt_template" && inspectorTab === "config" ? (
+                  <div className="rounded-[1.4rem] bg-mist/70 p-4">
+                    <p className="text-sm font-semibold text-ink">Prompt Template Studio</p>
+                    <p className="mt-1 text-xs leading-5 text-ink/55">Use variables like {"{{message}}"}, {"{{context}}"}, and {"{{document}}"} so upstream blocks can fill the prompt.</p>
+                    <div className="mt-3 grid gap-2">
+                      {[
+                        "Summarize {{document}} for {{audience}}. Return risks, actions, and sources.",
+                        "Rewrite this user question for retrieval: {{message}}. Include synonyms and entities.",
+                        "Convert {{text}} into a concise support answer using {{context}}.",
+                      ].map((prompt) => (
+                        <button
+                          key={prompt}
+                          type="button"
+                          onClick={() => updateSelectedNodeField({ key: "template", label: "Template", kind: "textarea", defaultValue: prompt }, prompt)}
+                          className="rounded-2xl bg-white px-3 py-2 text-left text-xs font-semibold leading-5"
+                        >
+                          {prompt}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedNode.data.blockType === "form_input" && inspectorTab === "config" ? (
+                  <div className="rounded-[1.4rem] bg-mist/70 p-4">
+                    <p className="text-sm font-semibold text-ink">Form Builder</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {["name", "email", "company", "request_type", "message", "priority", "attachment_url"].map((fieldName) => (
+                        <button
+                          key={fieldName}
+                          type="button"
+                          onClick={() => addFormInputField(fieldName)}
+                          className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-ink ring-1 ring-ink/8"
+                        >
+                          + {fieldName}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className={`space-y-4 ${inspectorTab === "config" ? "" : "hidden"}`}>
                   {selectedDefinition.fields.map((field) => (
                     <label key={field.key} className="block">
                       <span className="block text-sm font-semibold text-ink">{field.label}</span>
@@ -1912,7 +2526,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   ))}
                 </div>
 
-                <div className="rounded-[1.6rem] bg-mist/90 p-4">
+                <div className={`rounded-[1.6rem] bg-mist/90 p-4 ${inspectorTab === "config" ? "" : "hidden"}`}>
                   <p className="text-sm font-semibold text-ink">Ports</p>
                   <div className="mt-3 grid gap-2">
                     {selectedDefinition.inputs.map((port) => (
@@ -1939,19 +2553,41 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                 <button
                   type="button"
                   onClick={deleteSelectedNode}
-                  className="w-full rounded-2xl border border-coral/40 bg-coral/15 px-4 py-3 text-sm font-semibold text-ink"
+                  className={`w-full rounded-2xl border border-coral/40 bg-coral/15 px-4 py-3 text-sm font-semibold text-ink ${inspectorTab === "config" ? "" : "hidden"}`}
                 >
                   Delete Node
                 </button>
               </div>
             ) : (
-              <div className="rounded-[1.75rem] border border-dashed border-ink/15 bg-mist/70 p-6 text-sm leading-6 text-ink/62">
-                Select a node on the canvas to inspect and edit its schema-driven settings. Save and
-                load actions work for the whole graph using local browser storage.
+              <div className="space-y-4">
+                <div className="rounded-[1.75rem] border border-dashed border-ink/15 bg-mist/70 p-6 text-sm leading-6 text-ink/62">
+                  Select a node on the canvas to inspect and edit its schema-driven settings. Save and
+                  load actions work for the whole graph using local browser storage.
+                </div>
+                <div className={`rounded-[1.75rem] bg-ink p-4 text-white ${inspectorTab === "tools" ? "" : "hidden"}`}>
+                  <p className="text-sm font-semibold">Smart Auto-Build</p>
+                  <p className="mt-1 text-xs leading-5 text-white/65">
+                    Describe the workflow and AI Studio will create a saved graph using schema-driven blocks.
+                  </p>
+                  <textarea
+                    rows={4}
+                    value={autoBuildPrompt}
+                    onChange={(event) => setAutoBuildPrompt(event.target.value)}
+                    className="mt-3 w-full rounded-2xl border border-white/10 bg-white/10 px-3 py-2 text-sm text-white outline-none placeholder:text-white/35"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void autoBuildFromPrompt()}
+                    disabled={isRunning}
+                    className="mt-3 w-full rounded-2xl bg-lime px-4 py-3 text-sm font-semibold text-ink disabled:opacity-50"
+                  >
+                    Build Workflow
+                  </button>
+                </div>
               </div>
             )}
 
-            <div className="mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
+            <div className={`mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "fixes" ? "" : "hidden"}`}>
               <div className="flex items-center justify-between gap-3">
                 <p className="text-sm font-semibold text-ink">Run Readiness</p>
                 <span className="rounded-full bg-mist px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-ink/55">
@@ -1976,7 +2612,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               </div>
             </div>
 
-            <div className="mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
+            <div className={`mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "run" ? "" : "hidden"}`}>
               <p className="text-sm font-semibold text-ink">Publish Modes</p>
               <div className="mt-3 grid gap-2">
                 <button
@@ -1988,15 +2624,19 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   Publish Chatbot
                   <span className="mt-1 block text-xs font-normal text-white/65">Creates /chat URL for Chat Input + Chat Output workflows.</span>
                 </button>
-                {["Publish API Endpoint", "Publish Form/App", "Share Local Preview"].map((mode) => (
+                {[
+                  { label: "Publish API Endpoint", detail: "Use the Publish tab to copy the local chat API endpoint and request snippet." },
+                  { label: "Publish Form/App", detail: "Every saved workflow already has a shareable /app/:workflowId local app URL." },
+                  { label: "Share Local Preview", detail: "Run the workflow and open the full run page for clean logs, timings, outputs, and errors." },
+                ].map((mode) => (
                   <button
-                    key={mode}
+                    key={mode.label}
                     type="button"
-                    onClick={() => setStatusMessage(`${mode} is scaffolded for the next publish phase.`)}
+                    onClick={() => setStatusMessage(mode.detail)}
                     className="rounded-2xl border border-ink/10 bg-white px-4 py-3 text-left text-sm font-semibold text-ink"
                   >
-                    {mode}
-                    <span className="mt-1 block text-xs font-normal text-ink/55">Scaffolded mode. Backend contract can plug in here next.</span>
+                    {mode.label}
+                    <span className="mt-1 block text-xs font-normal text-ink/55">{mode.detail}</span>
                   </button>
                 ))}
               </div>
@@ -2023,7 +2663,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               )}
             </div>
 
-            <div className="mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
+            <div className={`mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "run" || inspectorTab === "runtime" ? "" : "hidden"}`}>
               <p className="text-base font-semibold text-ink">Runtime Inputs</p>
               <p className="mt-1 text-sm leading-6 text-ink/58">
                 These are the values used when you click Run. File Upload nodes now ask for
@@ -2204,6 +2844,9 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                       Run #{lastRun.id} for workflow #{lastRun.workflow_id} finished with status{" "}
                       <strong>{lastRun.status}</strong>.
                     </p>
+                    <p className="rounded-2xl bg-lime/20 px-4 py-3 text-sm leading-6 text-ink">
+                      {explainWorkflowRun(lastRun)}
+                    </p>
                     {runDisplayCards.length ? (
                       <div className="space-y-3">
                         {runDisplayCards.map((card) => (
@@ -2258,7 +2901,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               </div>
             </div>
 
-            <div className="mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
+            <div className={`mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "tools" ? "" : "hidden"}`}>
               <p className="text-sm font-semibold text-ink">Available Blocks</p>
               <p className="mt-1 text-sm text-ink/58">
                 {blockDefinitions.length} schema-defined blocks exist. Only implemented MVP blocks
@@ -2266,12 +2909,52 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               </p>
             </div>
 
-            <div className="mt-5">
+            <div className={`mt-5 ${inspectorTab === "tools" ? "" : "hidden"}`}>
               <RagManager workflowId={persistedWorkflowId} />
+            </div>
             </div>
           </aside>
         </section>
       </div>
+      {isSaveDialogOpen ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/28 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-[2rem] bg-white p-5 shadow-panel">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Save Version</p>
+                <h2 className="mt-2 text-2xl font-bold">What changed?</h2>
+                <p className="mt-1 text-sm leading-6 text-ink/58">
+                  This note is saved with the workflow version and mirrored into Activity comments for reviewers.
+                </p>
+              </div>
+              <button type="button" onClick={() => setIsSaveDialogOpen(false)} className="rounded-full bg-mist px-4 py-2 text-sm font-semibold">
+                Cancel
+              </button>
+            </div>
+            <textarea
+              rows={5}
+              value={versionNote}
+              onChange={(event) => setVersionNote(event.target.value)}
+              placeholder="Example: Connected RAG retrieval to chatbot, adjusted chunk size, and added dashboard output."
+              className="mt-4 w-full rounded-[1.35rem] border border-ink/10 bg-mist/60 px-4 py-3 text-sm leading-6 outline-none focus:border-ink/25"
+              autoFocus
+            />
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs leading-5 text-ink/50">
+                Tip: mention nodes added, removed, rewired, config changes, or why this version matters.
+              </p>
+              <button
+                type="button"
+                onClick={() => void saveGraph(versionNote)}
+                disabled={!versionNote.trim()}
+                className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save Version
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {preRunChecklist ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-ink/28 p-4 backdrop-blur-sm">
           <div className="w-full max-w-2xl rounded-[2rem] bg-white p-5 shadow-panel">

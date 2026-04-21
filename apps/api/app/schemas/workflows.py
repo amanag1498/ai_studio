@@ -109,6 +109,11 @@ class WorkflowSummary(BaseModel):
     last_run_status: str | None = None
     last_run_error: str | None = None
     last_run_at: datetime | None = None
+    last_run_preview: str | None = None
+    workflow_type: str = "builder"
+    quality_score: int = 0
+    quality_checks: dict[str, bool] = {}
+    quality_recommendations: list[str] = []
     rag_document_count: int = 0
     rag_chunk_count: int = 0
     rag_last_ingested_at: datetime | None = None

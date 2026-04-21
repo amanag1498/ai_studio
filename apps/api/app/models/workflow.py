@@ -106,7 +106,7 @@ class WorkflowVersion(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True)
     version_number: Mapped[int] = mapped_column(Integer(), nullable=False)
     version_note: Mapped[str | None] = mapped_column(Text(), nullable=True)
     graph_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
@@ -132,6 +132,88 @@ class WorkflowPermission(Base):
 
     workflow: Mapped[Workflow] = relationship(back_populates="permissions", foreign_keys=[workflow_id])
     user: Mapped["AppUser"] = relationship(foreign_keys=[user_id])
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True)
+    workflow_run_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False, default="workflow", server_default="workflow")
+    resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workflow: Mapped[Workflow | None] = relationship(foreign_keys=[workflow_id])
+    workflow_run: Mapped["WorkflowRun | None"] = relationship(foreign_keys=[workflow_run_id])
+    user: Mapped["AppUser | None"] = relationship(foreign_keys=[user_id])
+
+
+class WorkflowComment(Base):
+    __tablename__ = "workflow_comments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    node_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    body: Mapped[str] = mapped_column(Text(), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workflow: Mapped[Workflow] = relationship(foreign_keys=[workflow_id])
+    user: Mapped["AppUser | None"] = relationship(foreign_keys=[user_id])
+
+
+class WorkflowChangeEvent(Base):
+    __tablename__ = "workflow_change_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    change_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text(), nullable=False)
+    before_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workflow: Mapped[Workflow] = relationship(foreign_keys=[workflow_id])
+    user: Mapped["AppUser | None"] = relationship(foreign_keys=[user_id])
+
+
+class WorkflowSubflow(Base):
+    __tablename__ = "workflow_subflows"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    graph_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workflow: Mapped[Workflow | None] = relationship(foreign_keys=[workflow_id])
+    created_by_user: Mapped["AppUser | None"] = relationship(foreign_keys=[created_by_user_id])
+
+
+class RagEvaluation(Base):
+    __tablename__ = "rag_evaluations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    collection_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    query: Mapped[str] = mapped_column(Text(), nullable=False)
+    expected_answer: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    retrieved_chunk_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    retrieval_score: Mapped[float | None] = mapped_column(nullable=True)
+    hallucination_risk: Mapped[str] = mapped_column(String(50), nullable=False, default="unknown", server_default="unknown")
+    result_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workflow: Mapped[Workflow] = relationship(foreign_keys=[workflow_id])
 
 
 class WorkflowNode(Base):
@@ -268,7 +350,7 @@ class UploadedFile(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now())
 
-    workflow: Mapped[Workflow] = relationship(back_populates="uploaded_files", foreign_keys=[workflow_id])
+    workflow: Mapped[Workflow | None] = relationship(back_populates="uploaded_files", foreign_keys=[workflow_id])
     workflow_run: Mapped[WorkflowRun | None] = relationship(foreign_keys=[workflow_run_id])
     knowledge_documents: Mapped[list["KnowledgeDocument"]] = relationship(
         back_populates="uploaded_file",

@@ -31,6 +31,11 @@ export type WorkflowSummary = {
   last_run_status: string | null;
   last_run_error: string | null;
   last_run_at: string | null;
+  last_run_preview: string | null;
+  workflow_type: string;
+  quality_score: number;
+  quality_checks: Record<string, boolean>;
+  quality_recommendations: string[];
   rag_document_count: number;
   rag_chunk_count: number;
   rag_last_ingested_at: string | null;
@@ -41,13 +46,15 @@ export type WorkflowSummary = {
 export type WorkflowRecord = WorkflowSummary & {
   graph_json: BuilderGraph;
   published_version_id: number | null;
-  versions: Array<{
-    id: number;
-    version_number: number;
-    version_note: string | null;
-    graph_json: BuilderGraph;
-    created_at: string;
-  }>;
+  versions: WorkflowVersionRecord[];
+};
+
+export type WorkflowVersionRecord = {
+  id: number;
+  version_number: number;
+  version_note: string | null;
+  graph_json: BuilderGraph;
+  created_at: string;
 };
 
 export type AppUser = {
@@ -143,7 +150,7 @@ export type WorkflowRunRecord = {
 
 export type FileLibraryItem = {
   id: number;
-  workflow_id: number;
+  workflow_id: number | null;
   workflow_run_id: number | null;
   node_id: string;
   original_name: string;
@@ -165,6 +172,21 @@ export type KnowledgeCollection = {
   collection_name: string;
   document_count: number;
   chunk_count: number;
+  diagnostics?: RagCollectionDiagnostics;
+};
+
+export type RagCollectionDiagnostics = {
+  collection_name: string;
+  document_count: number;
+  chunk_count: number;
+  duplicate_document_count: number;
+  failed_document_count: number;
+  stale_embedding_count: number;
+  broken_collection: boolean;
+  last_ingested_at: string | null;
+  self_healing_available: boolean;
+  health_score: number;
+  recommendations: string[];
 };
 
 export type KnowledgeDocumentRecord = {
@@ -199,6 +221,67 @@ export type RetrievalTestResponse = {
     text: string;
     metadata: Record<string, unknown>;
   }>;
+};
+
+export type RagEvaluationRecord = {
+  id: number;
+  collection_name: string;
+  query: string;
+  expected_answer: string | null;
+  retrieval_score: number | null;
+  hallucination_risk: string | null;
+  result: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AuditLogRecord = {
+  id: number;
+  workflow_id: number | null;
+  workflow_run_id: number | null;
+  user_id: number | null;
+  event_type: string;
+  resource_type: string;
+  resource_id: string | null;
+  action: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ObservabilityDashboard = {
+  status: string;
+  generated_at: string;
+  metrics: Record<string, number>;
+  recent_failures: Array<Record<string, unknown>>;
+};
+
+export type WorkflowComment = {
+  id: number;
+  workflow_id: number;
+  node_id: string | null;
+  user_id: number | null;
+  body: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+};
+
+export type WorkflowChangeEvent = {
+  id: number;
+  workflow_id: number;
+  user_id: number | null;
+  change_type: string;
+  summary: string;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type WorkflowSubflow = {
+  id: number;
+  workflow_id: number;
+  name: string;
+  description: string | null;
+  graph_json?: BuilderGraph;
+  created_at: string;
 };
 
 export type PublishWorkflowResponse = {
@@ -270,6 +353,9 @@ export type VersionCompare = {
   version_id: number;
   version_number: number;
   current_version: number;
+  comparison_base: string;
+  comparison_label: string;
+  base_version_number: number | null;
   diff: {
     summary: Record<string, number>;
     added_nodes: string[];
@@ -363,6 +449,13 @@ export function createWorkflow(graph: BuilderGraph) {
   });
 }
 
+export function autoBuildWorkflow(payload: { prompt: string; name?: string }) {
+  return requestJson<WorkflowRecord>("/workflows/autobuild", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function updateWorkflow(workflowId: number, graph: BuilderGraph) {
   return requestJson<WorkflowRecord>(`/workflows/${workflowId}`, {
     method: "PUT",
@@ -370,6 +463,16 @@ export function updateWorkflow(workflowId: number, graph: BuilderGraph) {
       name: graph.name,
       description: "Builder workflow saved from the React Flow canvas.",
       status: "draft",
+      graph,
+    }),
+  });
+}
+
+export function saveWorkflowVersion(workflowId: number, graph: BuilderGraph, versionNote?: string) {
+  return requestJson<WorkflowVersionRecord>(`/workflows/${workflowId}/versions`, {
+    method: "POST",
+    body: JSON.stringify({
+      version_note: versionNote || null,
       graph,
     }),
   });
@@ -478,6 +581,17 @@ export function getUsageDashboard() {
   return requestJson<UsageDashboard>("/admin/usage");
 }
 
+export function getObservabilityDashboard() {
+  return requestJson<ObservabilityDashboard>("/admin/observability");
+}
+
+export function listAuditLogs(params: { workflow_id?: number; limit?: number } = {}) {
+  const search = new URLSearchParams();
+  if (params.workflow_id) search.set("workflow_id", String(params.workflow_id));
+  if (params.limit) search.set("limit", String(params.limit));
+  return requestJson<AuditLogRecord[]>(`/admin/audit-logs${search.toString() ? `?${search.toString()}` : ""}`);
+}
+
 export function getSystemHealthDetails() {
   return requestJson<SystemHealthDetails>("/system/health/details");
 }
@@ -509,6 +623,12 @@ export function listKnowledgeCollections(workflowId: number) {
   return requestJson<KnowledgeCollection[]>(`/workflows/${workflowId}/knowledge/collections`);
 }
 
+export function getKnowledgeCollectionDiagnostics(workflowId: number, collectionName: string) {
+  return requestJson<RagCollectionDiagnostics>(
+    `/workflows/${workflowId}/knowledge/collections/${encodeURIComponent(collectionName)}/diagnostics`,
+  );
+}
+
 export function listAllKnowledgeCollections() {
   return requestJson<GlobalKnowledgeCollection[]>("/knowledge/collections");
 }
@@ -533,6 +653,24 @@ export function testKnowledgeRetrieval(workflowId: number, collectionName: strin
   );
 }
 
+export function evaluateKnowledgeCollection(
+  workflowId: number,
+  collectionName: string,
+  payload: { query: string; expected_answer?: string; top_k?: number },
+) {
+  return requestJson<RagEvaluationRecord & { matches: RetrievalTestResponse["matches"] }>(
+    `/workflows/${workflowId}/knowledge/collections/${encodeURIComponent(collectionName)}/evaluate`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function listRagEvaluations(workflowId: number) {
+  return requestJson<RagEvaluationRecord[]>(`/workflows/${workflowId}/knowledge/evaluations`);
+}
+
 export function deleteKnowledgeCollection(workflowId: number, collectionName: string) {
   return requestJson<{ deleted: boolean; collection_name: string; document_count: number }>(
     `/workflows/${workflowId}/knowledge/collections/${encodeURIComponent(collectionName)}`,
@@ -547,8 +685,8 @@ export function reingestKnowledgeCollection(workflowId: number, collectionName: 
   );
 }
 
-export function compareWorkflowVersion(workflowId: number, versionId: number) {
-  return requestJson<VersionCompare>(`/workflows/${workflowId}/versions/${versionId}/compare`);
+export function compareWorkflowVersion(workflowId: number, versionId: number, base: "previous" | "current" = "previous") {
+  return requestJson<VersionCompare>(`/workflows/${workflowId}/versions/${versionId}/compare?base=${base}`);
 }
 
 export function listWorkflowPermissions(workflowId: number) {
@@ -579,6 +717,52 @@ export function importWorkflowBundle(bundle: Record<string, unknown>) {
   });
 }
 
+export function listWorkflowComments(workflowId: number) {
+  return requestJson<WorkflowComment[]>(`/workflows/${workflowId}/comments`);
+}
+
+export function createWorkflowComment(workflowId: number, payload: { body: string; node_id?: string | null }) {
+  return requestJson<WorkflowComment>(`/workflows/${workflowId}/comments`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listWorkflowHistory(workflowId: number) {
+  return requestJson<WorkflowChangeEvent[]>(`/workflows/${workflowId}/history`);
+}
+
+export function listSubflows() {
+  return requestJson<WorkflowSubflow[]>("/subflows");
+}
+
+export function createWorkflowSubflow(
+  workflowId: number,
+  payload: { name: string; description?: string | null; graph_json: BuilderGraph },
+) {
+  return requestJson<WorkflowSubflow>(`/workflows/${workflowId}/subflows`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function testWorkflowNode(
+  workflowId: number,
+  nodeId: string,
+  payload: { inputs: Record<string, unknown> },
+) {
+  return requestJson<{
+    run_id: number;
+    node_id: string;
+    outputs: Record<string, unknown>;
+    preview: Record<string, unknown>;
+    logs: Array<Record<string, unknown>>;
+  }>(`/workflows/${workflowId}/nodes/${encodeURIComponent(nodeId)}/test`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function uploadRuntimeFile(file: File): Promise<RuntimeUploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
@@ -604,4 +788,35 @@ export async function uploadRuntimeFile(file: File): Promise<RuntimeUploadRespon
   }
 
   return (await response.json()) as RuntimeUploadResponse;
+}
+
+export async function uploadLibraryFile(file: File): Promise<FileLibraryItem> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const localUserId = getLocalUserId();
+  const response = await fetch(`${API_BASE_URL}/files/library-upload`, {
+    method: "POST",
+    headers: {
+      ...(localUserId ? { "X-Local-User-Id": String(localUserId) } : {}),
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+
+    try {
+      const errorBody = (await response.json()) as { detail?: string };
+      if (errorBody.detail) {
+        detail = errorBody.detail;
+      }
+    } catch {
+      // Keep the HTTP fallback when the response is not JSON.
+    }
+
+    throw new Error(detail);
+  }
+
+  return (await response.json()) as FileLibraryItem;
 }

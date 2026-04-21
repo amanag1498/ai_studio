@@ -45,7 +45,7 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
     "file_upload": BlockDefinition(
         block_type="file_upload",
         inputs=(),
-        outputs=(BlockPortDefinition(id="file", data_types=("file",)),),
+        outputs=(BlockPortDefinition(id="file", data_types=("file",)), BlockPortDefinition(id="metadata", data_types=("json",))),
         fields=(
             BlockFieldDefinition(key="accept", required=True, allow_blank=False),
             BlockFieldDefinition(key="multiple", required=True),
@@ -55,7 +55,11 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
     "text_extraction": BlockDefinition(
         block_type="text_extraction",
         inputs=(BlockPortDefinition(id="file", data_types=("file",), required=True),),
-        outputs=(BlockPortDefinition(id="document", data_types=("document", "text")),),
+        outputs=(
+            BlockPortDefinition(id="document", data_types=("document", "text")),
+            BlockPortDefinition(id="text", data_types=("text",)),
+            BlockPortDefinition(id="metadata", data_types=("json",)),
+        ),
         fields=(BlockFieldDefinition(key="strategy", required=True, allow_blank=False),),
     ),
     "rag_knowledge": BlockDefinition(
@@ -64,7 +68,11 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
             BlockPortDefinition(id="document", data_types=("document", "text")),
             BlockPortDefinition(id="query", data_types=("chat", "text")),
         ),
-        outputs=(BlockPortDefinition(id="knowledge", data_types=("knowledge",)),),
+        outputs=(
+            BlockPortDefinition(id="knowledge", data_types=("knowledge",)),
+            BlockPortDefinition(id="matches", data_types=("json", "knowledge")),
+            BlockPortDefinition(id="diagnostics", data_types=("json",)),
+        ),
         fields=(
             BlockFieldDefinition(key="ingestMode", required=True, allow_blank=False),
             BlockFieldDefinition(key="collection", required=True, allow_blank=False),
@@ -149,7 +157,11 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
     "retry_fallback_llm": BlockDefinition(
         block_type="retry_fallback_llm",
         inputs=(BlockPortDefinition(id="prompt", data_types=("text", "chat"), required=True),),
-        outputs=(BlockPortDefinition(id="reply", data_types=("chat", "text")), BlockPortDefinition(id="json", data_types=("json",))),
+        outputs=(
+            BlockPortDefinition(id="reply", data_types=("chat", "text")),
+            BlockPortDefinition(id="json", data_types=("json",)),
+            BlockPortDefinition(id="citations", data_types=("json", "knowledge")),
+        ),
         fields=(
             BlockFieldDefinition(key="model", required=True, allow_blank=False),
             BlockFieldDefinition(key="fallbackModel", required=True, allow_blank=False),
@@ -252,10 +264,49 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         outputs=(BlockPortDefinition(id="memory", data_types=("memory", "knowledge", "text")),),
         fields=(BlockFieldDefinition(key="scope", required=True, allow_blank=False), BlockFieldDefinition(key="maxFacts", required=True)),
     ),
+    "web_search": BlockDefinition(
+        block_type="web_search",
+        inputs=(BlockPortDefinition(id="query", data_types=("chat", "text"), required=True),),
+        outputs=(BlockPortDefinition(id="results", data_types=("knowledge", "json")),),
+        fields=(BlockFieldDefinition(key="provider", required=True, allow_blank=False), BlockFieldDefinition(key="topK", required=True)),
+    ),
+    "web_page_reader": BlockDefinition(
+        block_type="web_page_reader",
+        inputs=(BlockPortDefinition(id="url", data_types=("text",), required=True),),
+        outputs=(BlockPortDefinition(id="document", data_types=("document", "text")),),
+        fields=(BlockFieldDefinition(key="url", required=False), BlockFieldDefinition(key="readerMode", required=True, allow_blank=False)),
+    ),
+    "browser_agent": BlockDefinition(
+        block_type="browser_agent",
+        inputs=(BlockPortDefinition(id="task", data_types=("text", "chat"), required=True),),
+        outputs=(BlockPortDefinition(id="result", data_types=("json", "text")),),
+        fields=(BlockFieldDefinition(key="task", required=False), BlockFieldDefinition(key="safetyMode", required=True, allow_blank=False)),
+    ),
+    "re_ranker": BlockDefinition(
+        block_type="re_ranker",
+        inputs=(BlockPortDefinition(id="knowledge", data_types=("knowledge", "json"), required=True),),
+        outputs=(BlockPortDefinition(id="knowledge", data_types=("knowledge", "json")),),
+        fields=(BlockFieldDefinition(key="strategy", required=True, allow_blank=False), BlockFieldDefinition(key="topK", required=True)),
+    ),
+    "query_rewriter": BlockDefinition(
+        block_type="query_rewriter",
+        inputs=(BlockPortDefinition(id="query", data_types=("chat", "text"), required=True),),
+        outputs=(BlockPortDefinition(id="query", data_types=("text",)),),
+        fields=(BlockFieldDefinition(key="domainHint", required=False),),
+    ),
+    "citation_verifier": BlockDefinition(
+        block_type="citation_verifier",
+        inputs=(
+            BlockPortDefinition(id="answer", data_types=("chat", "text"), required=True),
+            BlockPortDefinition(id="sources", data_types=("knowledge", "json"), required=True),
+        ),
+        outputs=(BlockPortDefinition(id="verification", data_types=("json",)),),
+        fields=(BlockFieldDefinition(key="minimumSupport", required=True),),
+    ),
     "conversation_memory": BlockDefinition(
         block_type="conversation_memory",
         inputs=(BlockPortDefinition(id="message", data_types=("chat", "text")),),
-        outputs=(BlockPortDefinition(id="memory", data_types=("memory", "text")),),
+        outputs=(BlockPortDefinition(id="memory", data_types=("memory", "text")), BlockPortDefinition(id="history", data_types=("json", "text"))),
         fields=(
             BlockFieldDefinition(key="namespace", required=True, allow_blank=False),
             BlockFieldDefinition(key="windowSize", required=True),
@@ -267,7 +318,7 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
             BlockPortDefinition(id="left", data_types=("text", "chat", "json", "knowledge", "any")),
             BlockPortDefinition(id="right", data_types=("text", "chat", "json", "knowledge", "any")),
         ),
-        outputs=(BlockPortDefinition(id="merged", data_types=("text", "json", "any")),),
+        outputs=(BlockPortDefinition(id="merged", data_types=("text", "json", "any")), BlockPortDefinition(id="json", data_types=("json",))),
         fields=(BlockFieldDefinition(key="mode", required=True, allow_blank=False),),
     ),
     "condition": BlockDefinition(
@@ -276,25 +327,26 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         outputs=(
             BlockPortDefinition(id="true", data_types=("any",)),
             BlockPortDefinition(id="false", data_types=("any",)),
+            BlockPortDefinition(id="evaluation", data_types=("json", "boolean")),
         ),
         fields=(BlockFieldDefinition(key="expression", required=True, allow_blank=False),),
     ),
     "chat_output": BlockDefinition(
         block_type="chat_output",
         inputs=(BlockPortDefinition(id="message", data_types=("chat", "text"), required=True),),
-        outputs=(),
+        outputs=(BlockPortDefinition(id="result", data_types=("chat", "json")),),
         fields=(BlockFieldDefinition(key="stream", required=True),),
     ),
     "json_output": BlockDefinition(
         block_type="json_output",
         inputs=(BlockPortDefinition(id="payload", data_types=("json", "text"), required=True),),
-        outputs=(),
+        outputs=(BlockPortDefinition(id="result", data_types=("json", "text")),),
         fields=(BlockFieldDefinition(key="prettyPrint", required=True),),
     ),
     "dashboard_preview": BlockDefinition(
         block_type="dashboard_preview",
         inputs=(BlockPortDefinition(id="content", data_types=("text", "json", "preview", "chat")),),
-        outputs=(),
+        outputs=(BlockPortDefinition(id="result", data_types=("preview", "json")),),
         fields=(BlockFieldDefinition(key="view", required=True, allow_blank=False),),
     ),
     "logger": BlockDefinition(

@@ -60,6 +60,12 @@ export interface BuilderBlockData {
     outputs: BlockPortDefinition[];
     config: BuilderBlockConfig;
     statusBadges?: string[];
+    runPreview?: {
+        status: string;
+        latencyMs?: number | null;
+        summary?: string;
+        error?: string | null;
+    };
 }
 export interface BuilderNode {
     id: string;

@@ -83,6 +83,7 @@ export const blockDefinitions: BlockDefinition[] = [
     inputs: [],
     outputs: [
       { id: "file", label: "File", direction: "output", dataTypes: ["file"] },
+      { id: "metadata", label: "File Metadata", direction: "output", dataTypes: ["json"] },
     ],
     fields: fields([
       {
@@ -134,6 +135,8 @@ export const blockDefinitions: BlockDefinition[] = [
     ],
     outputs: [
       { id: "document", label: "Document", direction: "output", dataTypes: ["document", "text"] },
+      { id: "text", label: "Extracted Text", direction: "output", dataTypes: ["text"] },
+      { id: "metadata", label: "Extraction Metadata", direction: "output", dataTypes: ["json"] },
     ],
     fields: fields([
       {
@@ -165,6 +168,8 @@ export const blockDefinitions: BlockDefinition[] = [
     ],
     outputs: [
       { id: "knowledge", label: "Knowledge", direction: "output", dataTypes: ["knowledge"] },
+      { id: "matches", label: "Source Matches", direction: "output", dataTypes: ["json", "knowledge"] },
+      { id: "diagnostics", label: "RAG Diagnostics", direction: "output", dataTypes: ["json"] },
     ],
     fields: fields([
       {
@@ -252,6 +257,7 @@ export const blockDefinitions: BlockDefinition[] = [
     outputs: [
       { id: "reply", label: "Reply", direction: "output", dataTypes: ["chat", "text"] },
       { id: "json", label: "Structured", direction: "output", dataTypes: ["json"] },
+      { id: "citations", label: "Citations", direction: "output", dataTypes: ["json", "knowledge"] },
     ],
     fields: fields([
       {
@@ -307,6 +313,7 @@ export const blockDefinitions: BlockDefinition[] = [
     ],
     outputs: [
       { id: "memory", label: "Memory", direction: "output", dataTypes: ["memory", "text"] },
+      { id: "history", label: "Recent History", direction: "output", dataTypes: ["json", "text"] },
     ],
     fields: fields([
       {
@@ -343,6 +350,7 @@ export const blockDefinitions: BlockDefinition[] = [
     ],
     outputs: [
       { id: "merged", label: "Merged", direction: "output", dataTypes: ["text", "json", "any"] },
+      { id: "json", label: "Merge Details", direction: "output", dataTypes: ["json"] },
     ],
     fields: fields([
       {
@@ -374,6 +382,7 @@ export const blockDefinitions: BlockDefinition[] = [
     outputs: [
       { id: "true", label: "True", direction: "output", dataTypes: ["any"] },
       { id: "false", label: "False", direction: "output", dataTypes: ["any"] },
+      { id: "evaluation", label: "Evaluation", direction: "output", dataTypes: ["json", "boolean"] },
     ],
     fields: fields([
       {
@@ -399,7 +408,9 @@ export const blockDefinitions: BlockDefinition[] = [
     inputs: [
       { id: "message", label: "Message", direction: "input", dataTypes: ["chat", "text"], required: true },
     ],
-    outputs: [],
+    outputs: [
+      { id: "result", label: "Rendered Chat", direction: "output", dataTypes: ["chat", "json"] },
+    ],
     fields: fields([
       {
         key: "stream",
@@ -422,7 +433,9 @@ export const blockDefinitions: BlockDefinition[] = [
     inputs: [
       { id: "payload", label: "Payload", direction: "input", dataTypes: ["json", "text"], required: true },
     ],
-    outputs: [],
+    outputs: [
+      { id: "result", label: "Rendered JSON", direction: "output", dataTypes: ["json", "text"] },
+    ],
     fields: fields([
       {
         key: "prettyPrint",
@@ -445,7 +458,9 @@ export const blockDefinitions: BlockDefinition[] = [
     inputs: [
       { id: "content", label: "Content", direction: "input", dataTypes: ["text", "json", "preview", "chat"] },
     ],
-    outputs: [],
+    outputs: [
+      { id: "result", label: "Rendered Preview", direction: "output", dataTypes: ["preview", "json"] },
+    ],
     fields: fields([
       {
         key: "view",
@@ -905,8 +920,10 @@ export const blockDefinitions: BlockDefinition[] = [
     title: "Web Search",
     category: "Knowledge",
     kind: "knowledge",
-    releasePhase: "phase2",
-    description: "Coming soon: fetch web search results as live context.",
+    visibleInPalette: true,
+    implementationStatus: "implemented",
+    releasePhase: "mvp",
+    description: "Prepare search-style knowledge results. Live providers can plug into this adapter later.",
     integrationNotes:
       "Will call a search provider and emit knowledge payloads compatible with RAG and Chatbot blocks.",
     accentColor: "#6bc4ff",
@@ -923,8 +940,10 @@ export const blockDefinitions: BlockDefinition[] = [
     title: "Web Page Reader",
     category: "Knowledge",
     kind: "knowledge",
-    releasePhase: "phase2",
-    description: "Coming soon: read and normalize web page content.",
+    visibleInPalette: true,
+    implementationStatus: "implemented",
+    releasePhase: "mvp",
+    description: "Normalize a URL into a document payload. Live fetching is adapter-gated.",
     integrationNotes:
       "Will accept URLs, fetch page content, and emit document payloads for RAG or summarization.",
     accentColor: "#6fcbff",
@@ -953,6 +972,54 @@ export const blockDefinitions: BlockDefinition[] = [
       { key: "authMode", label: "Auth Mode", kind: "text", defaultValue: "api-key" },
     ]),
   }),
+  {
+    type: "browser_agent",
+    title: "Browser Agent",
+    category: "AI",
+    kind: "agent",
+    implementationStatus: "implemented",
+    releasePhase: "mvp",
+    description: "Plan browser automation steps for a task. Real browser execution is adapter-gated.",
+    accentColor: "#55c7d4",
+    icon: "BA",
+    inputs: [{ id: "task", label: "Task", direction: "input", dataTypes: ["text", "chat"], required: true }],
+    outputs: [{ id: "result", label: "Result", direction: "output", dataTypes: ["json", "text"] }],
+    fields: fields([
+      { key: "task", label: "Default Task", kind: "textarea", defaultValue: "Inspect the page and summarize useful facts." },
+      { key: "safetyMode", label: "Safety Mode", kind: "select", defaultValue: "plan_only", options: [{ label: "Plan Only", value: "plan_only" }, { label: "Read Only", value: "read_only" }] },
+    ]),
+  },
+  {
+    type: "query_rewriter",
+    title: "Query Rewriter",
+    category: "Knowledge",
+    kind: "knowledge",
+    implementationStatus: "implemented",
+    releasePhase: "mvp",
+    description: "Improve vague search/RAG questions before retrieval.",
+    accentColor: "#65d6ad",
+    icon: "QR",
+    inputs: [{ id: "query", label: "Query", direction: "input", dataTypes: ["chat", "text"], required: true }],
+    outputs: [{ id: "query", label: "Rewritten Query", direction: "output", dataTypes: ["text"] }],
+    fields: fields([{ key: "domainHint", label: "Domain Hint", kind: "text", defaultValue: "policy evidence" }]),
+  },
+  {
+    type: "citation_verifier",
+    title: "Citation Verifier",
+    category: "Knowledge",
+    kind: "knowledge",
+    implementationStatus: "implemented",
+    releasePhase: "mvp",
+    description: "Score whether answer terms are supported by retrieved sources.",
+    accentColor: "#70d5a1",
+    icon: "CV",
+    inputs: [
+      { id: "answer", label: "Answer", direction: "input", dataTypes: ["chat", "text"], required: true },
+      { id: "sources", label: "Sources", direction: "input", dataTypes: ["knowledge", "json"], required: true },
+    ],
+    outputs: [{ id: "verification", label: "Verification", direction: "output", dataTypes: ["json"] }],
+    fields: fields([{ key: "minimumSupport", label: "Minimum Support", kind: "number", defaultValue: 0.35, min: 0, max: 1, step: 0.05 }]),
+  },
   futureBlock({
     type: "error_handler",
     title: "Error Handler",
@@ -976,8 +1043,10 @@ export const blockDefinitions: BlockDefinition[] = [
     title: "Re-ranker",
     category: "Knowledge",
     kind: "knowledge",
-    releasePhase: "phase2",
-    description: "Coming soon: reorder retrieved chunks for better relevance.",
+    visibleInPalette: true,
+    implementationStatus: "implemented",
+    releasePhase: "mvp",
+    description: "Reorder retrieved chunks by score and content quality before answer generation.",
     integrationNotes:
       "Will sit after RAG retrieval and before Chatbot to improve source selection and citations.",
     accentColor: "#70d5a1",

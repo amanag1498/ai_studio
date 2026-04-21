@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.core.config import settings
 from app.db.session import create_db_and_storage_dirs
+from app.services.telemetry import configure_opentelemetry, configure_structured_logging
 
 
 @asynccontextmanager
@@ -16,7 +17,10 @@ async def lifespan(_: FastAPI):
     yield
 
 
+configure_structured_logging()
+
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.state.telemetry = configure_opentelemetry(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

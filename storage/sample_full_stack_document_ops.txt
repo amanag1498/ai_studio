@@ -1,0 +1,59 @@
+Remote Work Security Exception Request
+
+Request ID: RWS-2026-041
+Submitted by: Priya Sharma
+Email: priya.sharma@example.com
+Phone: +1 415 555 0188
+Department: Customer Success
+Requested start date: 2026-05-01
+Requested end date: 2026-08-31
+Priority: urgent
+
+Summary
+
+Priya Sharma is requesting approval to work remotely from Toronto for four months while supporting enterprise customers in the North America region. The employee will access CRM, support ticketing, customer policy documents, and internal knowledge base systems from a company-managed laptop.
+
+Business Justification
+
+The request supports continuity for three high-priority enterprise accounts during a temporary relocation. Priya is the primary customer success owner for two renewal conversations and one escalated implementation. Delaying approval may create customer response gaps during the renewal period.
+
+Security Requirements
+
+All remote work must use multi-factor authentication. Customer data must stay on the company-managed device and may not be copied to personal cloud storage, USB drives, or personal email. The laptop must have disk encryption enabled, endpoint protection active, and operating system updates installed within seven days of release.
+
+Network Requirements
+
+The employee must use the company VPN for CRM, support ticketing, and knowledge base access. Public Wi-Fi is allowed only when routed through the VPN. The employee must not access customer data from shared computers, hotel business centers, or unmanaged mobile devices.
+
+Approval Conditions
+
+Approval is conditional on Security confirming device compliance before the start date. Customer Success leadership must confirm coverage for after-hours urgent tickets. The employee must complete a remote work security checklist and acknowledge data handling rules before remote access is extended.
+
+Risk Register
+
+Risk ID | Risk | Severity | Owner | Mitigation
+R-001 | Customer data exposure from unmanaged network | High | Security | Enforce VPN and MFA
+R-002 | Delayed response to urgent customer tickets | Medium | Customer Success | Add backup owner
+R-003 | Device patching drift during travel | Medium | IT | Weekly compliance check
+R-004 | Accidental sharing of customer files through personal apps | High | Security | Block personal cloud sync
+
+Required Actions
+
+1. Security must verify laptop encryption, endpoint protection, VPN profile, and MFA enrollment.
+2. IT must confirm device patch status before 2026-05-01.
+3. Customer Success must assign a backup owner for urgent escalations.
+4. Priya must complete remote work security training by 2026-04-28.
+5. Legal review is not required unless customer data will be exported or processed outside approved systems.
+
+Decision Guidance
+
+This request can be approved if the security checklist is completed and a backup owner is assigned. If either condition is missing, the request should be routed for additional review before approval.
+
+Expected JSON Extraction Fields
+
+document_type: remote_work_security_exception
+summary: temporary remote work request for customer success coverage
+risks: customer data exposure, delayed support response, patching drift, accidental personal app sharing
+owners: Security, IT, Customer Success, Priya Sharma
+next_actions: verify device compliance, confirm backup owner, complete training, approve with conditions
+approval_needed: true

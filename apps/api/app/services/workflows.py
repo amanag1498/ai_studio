@@ -200,17 +200,23 @@ def save_workflow_version(
     validated_graph: ValidatedGraph,
 ) -> WorkflowVersion:
     next_version_number = workflow.latest_saved_version + 1
-    workflow.graph_json = validated_graph.graph_json
-    workflow.current_version = validated_graph.graph_json["version"]
+    versioned_graph_json = {**validated_graph.graph_json, "version": next_version_number}
+    versioned_graph = ValidatedGraph(
+        graph_json=versioned_graph_json,
+        nodes=validated_graph.nodes,
+        edges=validated_graph.edges,
+    )
+    workflow.graph_json = versioned_graph.graph_json
+    workflow.current_version = next_version_number
     workflow.latest_saved_version = next_version_number
 
-    _replace_normalized_graph(session, workflow, validated_graph)
+    _replace_normalized_graph(session, workflow, versioned_graph)
 
     version = WorkflowVersion(
         workflow_id=workflow.id,
         version_number=next_version_number,
         version_note=version_note,
-        graph_json=validated_graph.graph_json,
+        graph_json=versioned_graph.graph_json,
     )
     session.add(version)
     session.add(workflow)

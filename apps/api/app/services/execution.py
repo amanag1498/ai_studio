@@ -372,6 +372,18 @@ def execute_node(node: dict[str, Any], context: ExecutionContext) -> NodeExecuti
         return execute_router_switch(node, context)
     if block_type == "long_term_memory":
         return execute_long_term_memory(node, context)
+    if block_type == "web_search":
+        return execute_web_search(node, context)
+    if block_type == "web_page_reader":
+        return execute_web_page_reader(node, context)
+    if block_type == "browser_agent":
+        return execute_browser_agent(node, context)
+    if block_type == "re_ranker":
+        return execute_re_ranker(node, context)
+    if block_type == "query_rewriter":
+        return execute_query_rewriter(node, context)
+    if block_type == "citation_verifier":
+        return execute_citation_verifier(node, context)
     if block_type == "conversation_memory":
         return execute_conversation_memory(node, context)
     if block_type == "merge":
@@ -453,7 +465,22 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
         {"files": persisted_file_metadata, "count": len(persisted_file_metadata)},
         {"count": len(persisted_file_metadata)},
     )
-    return single_output_result("file", payload, node["data"]["label"], f"{len(persisted_files)} file(s) staged.")
+    metadata_payload = typed_payload(
+        "json",
+        {
+            "files": persisted_file_metadata,
+            "accepted_extensions": sorted(accepted_extensions),
+            "max_size_bytes": max_size_bytes,
+            "count": len(persisted_file_metadata),
+        },
+        {"count": len(persisted_file_metadata), "extensions": sorted({file["extension"] for file in persisted_file_metadata})},
+        {"count": len(persisted_file_metadata)},
+    )
+    return NodeExecutionResult(
+        outputs={"file": payload, "metadata": metadata_payload},
+        preview={"label": node["data"]["label"], "output": payload.preview, "metadata": metadata_payload.preview},
+        logs=[log_entry("info", f"{len(persisted_files)} file(s) staged.")],
+    )
 
 
 def parse_default_file_paths(value: Any) -> list[str]:
@@ -524,11 +551,27 @@ def execute_text_extraction(node: dict[str, Any], context: ExecutionContext) -> 
         },
         {"document_count": len(extracted_documents), "strategy": strategy},
     )
-    return single_output_result(
-        "document",
-        payload,
-        node["data"]["label"],
-        f"Extracted text from {len(extracted_documents)} document(s).",
+    text_payload = typed_payload(
+        "text",
+        combined_text,
+        preview_text(combined_text),
+        {"document_count": len(extracted_documents), "strategy": strategy},
+    )
+    metadata_payload = typed_payload(
+        "json",
+        {
+            "document_count": len(extracted_documents),
+            "strategy": strategy,
+            "documents": [document["metadata"] for document in extracted_documents],
+            "text_length": len(combined_text),
+        },
+        {"document_count": len(extracted_documents), "text_length": len(combined_text)},
+        {"strategy": strategy},
+    )
+    return NodeExecutionResult(
+        outputs={"document": payload, "text": text_payload, "metadata": metadata_payload},
+        preview={"label": node["data"]["label"], "output": payload.preview, "text": text_payload.preview},
+        logs=[log_entry("info", f"Extracted text from {len(extracted_documents)} document(s).")],
     )
 
 
@@ -598,14 +641,40 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
             "tags": rag_config.tags,
         },
     )
-    return single_output_result(
-        "knowledge",
-        payload,
-        node["data"]["label"],
-        (
-            f"Indexed {ingest_summary['chunks_indexed']} chunk(s) and retrieved "
-            f"{len(ranked_documents)} knowledge match(es) in mode '{rag_config.ingest_mode}'."
-        ),
+    matches_payload = typed_payload(
+        "json",
+        ranked_documents,
+        {"match_count": len(ranked_documents), "top_score": ranked_documents[0]["score"] if ranked_documents else None},
+        {"collection_name": rag_config.collection_name},
+    )
+    diagnostics_payload = typed_payload(
+        "json",
+        {
+            "collection_name": rag_config.collection_name,
+            "mode": rag_config.ingest_mode,
+            "query": query,
+            "documents_seen": ingest_summary["documents_seen"],
+            "documents_indexed": ingest_summary["documents_indexed"],
+            "chunks_indexed": ingest_summary["chunks_indexed"],
+            "matches_returned": len(ranked_documents),
+            "has_query": bool(query.strip()),
+            "tags": rag_config.tags,
+        },
+        {"collection_name": rag_config.collection_name, "matches_returned": len(ranked_documents), "chunks_indexed": ingest_summary["chunks_indexed"]},
+        {"collection_name": rag_config.collection_name},
+    )
+    return NodeExecutionResult(
+        outputs={"knowledge": payload, "matches": matches_payload, "diagnostics": diagnostics_payload},
+        preview={"label": node["data"]["label"], "output": payload.preview, "diagnostics": diagnostics_payload.preview},
+        logs=[
+            log_entry(
+                "info",
+                (
+                    f"Indexed {ingest_summary['chunks_indexed']} chunk(s) and retrieved "
+                    f"{len(ranked_documents)} knowledge match(es) in mode '{rag_config.ingest_mode}'."
+                ),
+            )
+        ],
     )
 
 
@@ -681,8 +750,14 @@ def execute_chatbot(
             "answer_style": answer_style,
         },
     )
+    citations_payload = typed_payload(
+        "json",
+        {"citations": citations, "source_chunks": source_chunks, "citation_count": len(citations), "source_chunk_count": len(source_chunks)},
+        {"citation_count": len(citations), "source_chunk_count": len(source_chunks)},
+        {"model": model, "provider": llm_response.provider},
+    )
     return NodeExecutionResult(
-        outputs={"reply": reply_payload, "json": json_payload},
+        outputs={"reply": reply_payload, "json": json_payload, "citations": citations_payload},
         preview={
             "reply": preview_text(answer_text),
             "model": model,
@@ -1137,6 +1212,95 @@ def execute_long_term_memory(node: dict[str, Any], context: ExecutionContext) ->
     return single_output_result("memory", payload, node["data"]["label"], f"Long-term memory loaded {len(history)} fact(s).")
 
 
+def execute_web_search(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    query = str(first_payload_value(context.node_inputs[node["id"]].get("query", [])) or "")
+    top_k = int(node["data"]["config"].get("topK", 5))
+    results = [
+        {
+            "title": f"Prepared search result {index + 1} for {query}",
+            "url": f"https://example.com/search/{index + 1}",
+            "snippet": f"Local-first placeholder result for query '{query}'. Connect a search provider adapter to fetch live web results.",
+            "provider": node["data"]["config"].get("provider", "local-placeholder"),
+        }
+        for index in range(top_k)
+    ]
+    payload = typed_payload("knowledge", {"query": query, "matches": results}, {"query": query, "match_count": len(results)})
+    return single_output_result("results", payload, node["data"]["label"], "Web Search prepared local placeholder results.")
+
+
+def execute_web_page_reader(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    url = str(first_payload_value(context.node_inputs[node["id"]].get("url", [])) or node["data"]["config"].get("url", ""))
+    content = (
+        f"Reader-mode placeholder for {url}. "
+        "Live fetching is intentionally adapter-gated for local-first safety."
+    )
+    payload = typed_payload(
+        "document",
+        {"documents": [{"source_path": url, "text": content, "metadata": {"url": url, "source": "web_page_reader"}}], "combined_text": content},
+        {"text_preview": preview_text(content), "url": url},
+        {"url": url},
+    )
+    return single_output_result("document", payload, node["data"]["label"], "Web Page Reader prepared a normalized document.")
+
+
+def execute_browser_agent(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    task = str(first_payload_value(context.node_inputs[node["id"]].get("task", [])) or node["data"]["config"].get("task", "Inspect page"))
+    plan = {
+        "task": task,
+        "steps": [
+            "Open target page",
+            "Inspect visible content",
+            "Extract requested fields",
+            "Return structured result",
+        ],
+        "mode": "planned_not_executed",
+        "note": "Browser automation adapter is scaffolded but disabled in local MVP.",
+    }
+    payload = typed_payload("json", plan, summarize_preview_content(plan))
+    return single_output_result("result", payload, node["data"]["label"], "Browser Agent produced a safe execution plan.")
+
+
+def execute_re_ranker(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    value = merge_payload_values(context.node_inputs[node["id"]].get("knowledge", []))
+    top_k = int(node["data"]["config"].get("topK", 5))
+    if not isinstance(value, dict):
+        raise ValueError("Re-ranker requires knowledge/json input.")
+    matches = list(value.get("matches", []))
+    matches.sort(key=lambda match: (match.get("score") is None, match.get("score", 999), -len(str(match.get("snippet", "")))))
+    reranked = {**value, "matches": matches[:top_k], "rerank_strategy": node["data"]["config"].get("strategy", "score_then_length")}
+    payload = typed_payload("knowledge", reranked, {"match_count": len(reranked["matches"]), "strategy": reranked["rerank_strategy"]})
+    return single_output_result("knowledge", payload, node["data"]["label"], f"Re-ranked {len(matches)} match(es).")
+
+
+def execute_query_rewriter(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    query = str(first_payload_value(context.node_inputs[node["id"]].get("query", [])) or "")
+    domain = str(node["data"]["config"].get("domainHint", "")).strip()
+    rewritten = query.strip()
+    if domain and domain.lower() not in rewritten.lower():
+        rewritten = f"{rewritten} ({domain})"
+    if len(rewritten.split()) < 4:
+        rewritten = f"{rewritten} policy requirements exceptions owners evidence".strip()
+    payload = typed_payload("text", rewritten, preview_text(rewritten), {"original_query": query, "domain_hint": domain})
+    return single_output_result("query", payload, node["data"]["label"], "Query rewritten for retrieval.")
+
+
+def execute_citation_verifier(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    answer = str(first_payload_value(context.node_inputs[node["id"]].get("answer", [])) or "")
+    source_payloads = context.node_inputs[node["id"]].get("sources", [])
+    source_text = render_content_payloads(source_payloads)
+    answer_terms = {term.lower().strip(".,:;!?") for term in answer.split() if len(term) > 4}
+    supported_terms = {term for term in answer_terms if term in source_text.lower()}
+    support_score = round(len(supported_terms) / len(answer_terms), 3) if answer_terms else 0.0
+    result = {
+        "support_score": support_score,
+        "verified": support_score >= float(node["data"]["config"].get("minimumSupport", 0.35)),
+        "supported_terms": sorted(supported_terms),
+        "unsupported_terms": sorted(answer_terms - supported_terms)[:25],
+    }
+    payload = typed_payload("json", result, {"support_score": support_score, "verified": result["verified"]})
+    return single_output_result("verification", payload, node["data"]["label"], "Citation support verification completed.")
+
+
 def execute_conversation_memory(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     namespace = str(node["data"]["config"].get("namespace", "default-session"))
     window_size = int(node["data"]["config"].get("windowSize", 8))
@@ -1166,14 +1330,24 @@ def execute_conversation_memory(node: dict[str, Any], context: ExecutionContext)
         },
         {"window_size": window_size, "session_id": context.session_id, "user_id": context.user_id},
     )
-    return single_output_result(
-        "memory",
-        payload,
-        node["data"]["label"],
-        (
-            f"Conversation memory updated in namespace '{namespace}' for "
-            f"session '{context.session_id}' and user '{context.user_id}'."
-        ),
+    history_payload = typed_payload(
+        "json",
+        {"history": history, "history_text": memory_text, "window_size": window_size},
+        {"history_count": len(history), "history_preview": preview_text(memory_text)},
+        {"window_size": window_size},
+    )
+    return NodeExecutionResult(
+        outputs={"memory": payload, "history": history_payload},
+        preview={"label": node["data"]["label"], "output": payload.preview, "history": history_payload.preview},
+        logs=[
+            log_entry(
+                "info",
+                (
+                    f"Conversation memory updated in namespace '{namespace}' for "
+                    f"session '{context.session_id}' and user '{context.user_id}'."
+                ),
+            )
+        ],
     )
 
 
@@ -1193,7 +1367,17 @@ def execute_merge(node: dict[str, Any], context: ExecutionContext) -> NodeExecut
         },
         {"mode": mode, "input_count": merged_value["input_count"]},
     )
-    return single_output_result("merged", payload, node["data"]["label"], f"Merge completed with mode '{mode}'.")
+    details_payload = typed_payload(
+        "json",
+        {"mode": mode, "merged": merged_value, "input_count": merged_value["input_count"]},
+        {"mode": mode, "input_count": merged_value["input_count"]},
+        {"mode": mode},
+    )
+    return NodeExecutionResult(
+        outputs={"merged": payload, "json": details_payload},
+        preview={"label": node["data"]["label"], "output": payload.preview},
+        logs=[log_entry("info", f"Merge completed with mode '{mode}'.")],
+    )
 
 
 def execute_condition(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
@@ -1217,7 +1401,8 @@ def execute_condition(node: dict[str, Any], context: ExecutionContext) -> NodeEx
         },
         {"expression": expression, "branch": branch},
     )
-    outputs: dict[str, TypedPayload] = {branch: payload}
+    evaluation_payload = typed_payload("json", evaluation, {"matched": evaluation["matched"], "rule": evaluation["rule"], "branch": branch}, {"expression": expression})
+    outputs: dict[str, TypedPayload] = {branch: payload, "evaluation": evaluation_payload}
     return NodeExecutionResult(
         outputs=outputs,
         preview={"matched": evaluation["matched"], "rule": evaluation["rule"], "branch": branch},

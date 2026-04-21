@@ -3,21 +3,31 @@ import {
   API_BASE_URL,
   addWorkflowPermission,
   archiveWorkflow,
+  autoBuildWorkflow,
   compareWorkflowVersion,
   createWorkflowFromTemplate,
+  createWorkflowComment,
+  createWorkflowSubflow,
   deleteWorkflow,
   deleteWorkflowPermission,
   duplicateWorkflow,
   exportWorkflowBundle,
   getChatUrl,
+  getObservabilityDashboard,
   getSystemHealthDetails,
   getUsageDashboard,
   getWorkflow,
   importWorkflowBundle,
+  listAuditLogs,
   listAllKnowledgeCollections,
   listBlockMarketplace,
+  listFiles,
   listPublishedChatbots,
+  listSubflows,
+  listWorkflowComments,
+  listWorkflowHistory,
   listWorkflowPermissions,
+  listWorkflowRuns,
   listWorkflowTemplates,
   listWorkflows,
   login,
@@ -28,15 +38,23 @@ import {
   testKnowledgeRetrieval,
   unpublishWorkflow,
   updateWorkflowMetadata,
+  uploadLibraryFile,
   type AppUser,
+  type AuditLogRecord,
   type BlockMarketplaceItem,
   type GlobalKnowledgeCollection,
+  type ObservabilityDashboard,
   type SystemHealthDetails,
   type UsageDashboard,
   type VersionCompare,
   type WorkflowPermission,
   type WorkflowRecord,
+  type WorkflowRunRecord,
   type WorkflowSummary,
+  type WorkflowChangeEvent,
+  type WorkflowComment,
+  type FileLibraryItem,
+  type WorkflowSubflow,
 } from "../lib/api";
 import type { BuilderGraph } from "@vmb/shared";
 
@@ -48,12 +66,14 @@ type WorkflowsPageProps = {
   onOpenFiles: () => void;
 };
 
-type HomeView = "workflows" | "create" | "templates" | "usage" | "publish" | "knowledge" | "marketplace" | "health" | "bundle" | "account";
+type HomeView = "workflows" | "create" | "templates" | "usage" | "runs" | "publish" | "files" | "knowledge" | "components" | "marketplace" | "health" | "bundle" | "account";
 
 export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflowApp, onOpenChat, onOpenFiles }: WorkflowsPageProps) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [workflowKinds, setWorkflowKinds] = useState<Record<number, "chat" | "builder">>({});
   const [usage, setUsage] = useState<UsageDashboard | null>(null);
+  const [observability, setObservability] = useState<ObservabilityDashboard | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
     try {
       const savedUser = localStorage.getItem("vmb-local-user");
@@ -69,9 +89,18 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   const [permissionWorkflow, setPermissionWorkflow] = useState<WorkflowSummary | null>(null);
   const [permissions, setPermissions] = useState<WorkflowPermission[]>([]);
   const [permissionForm, setPermissionForm] = useState({ email: "", role: "viewer" });
+  const [collaborationWorkflow, setCollaborationWorkflow] = useState<WorkflowRecord | null>(null);
+  const [workflowComments, setWorkflowComments] = useState<WorkflowComment[]>([]);
+  const [workflowHistory, setWorkflowHistory] = useState<WorkflowChangeEvent[]>([]);
+  const [subflows, setSubflows] = useState<WorkflowSubflow[]>([]);
+  const [allSubflows, setAllSubflows] = useState<WorkflowSubflow[]>([]);
+  const [recentRuns, setRecentRuns] = useState<WorkflowRunRecord[]>([]);
+  const [commentBody, setCommentBody] = useState("");
+  const [subflowName, setSubflowName] = useState("");
   const [systemHealth, setSystemHealth] = useState<SystemHealthDetails | null>(null);
   const [globalKnowledge, setGlobalKnowledge] = useState<GlobalKnowledgeCollection[]>([]);
   const [marketplaceBlocks, setMarketplaceBlocks] = useState<BlockMarketplaceItem[]>([]);
+  const [fileLibrary, setFileLibrary] = useState<FileLibraryItem[]>([]);
   const [bundleImportText, setBundleImportText] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -82,6 +111,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   const [activeView, setActiveView] = useState<HomeView>("workflows");
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthBusy, setIsAuthBusy] = useState(false);
+  const [isFileUploading, setIsFileUploading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Loading workflows from the local API.");
 
   useEffect(() => {
@@ -127,6 +157,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
         }),
       );
       setWorkflowKinds(Object.fromEntries(classifiedEntries));
+      void refreshRunHistory(records);
       setStatusMessage(records.length ? `${records.length} workflow(s) found.` : "No workflows yet.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not load workflows.";
@@ -138,9 +169,18 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
 
   async function refreshUsage() {
     try {
-      setUsage(await getUsageDashboard());
+      const [usageDashboard, observable, audits] = await Promise.all([
+        getUsageDashboard(),
+        getObservabilityDashboard(),
+        listAuditLogs({ limit: 8 }),
+      ]);
+      setUsage(usageDashboard);
+      setObservability(observable);
+      setAuditLogs(audits);
     } catch {
       setUsage(null);
+      setObservability(null);
+      setAuditLogs([]);
     }
   }
 
@@ -165,14 +205,52 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   }
 
   async function refreshProductSurfaces() {
-    const [health, knowledge, blocks] = await Promise.allSettled([
+    const [health, knowledge, blocks, files, savedSubflows] = await Promise.allSettled([
       getSystemHealthDetails(),
       listAllKnowledgeCollections(),
       listBlockMarketplace(),
+      listFiles(),
+      listSubflows(),
     ]);
     if (health.status === "fulfilled") setSystemHealth(health.value);
     if (knowledge.status === "fulfilled") setGlobalKnowledge(knowledge.value);
     if (blocks.status === "fulfilled") setMarketplaceBlocks(blocks.value);
+    if (files.status === "fulfilled") setFileLibrary(files.value);
+    if (savedSubflows.status === "fulfilled") setAllSubflows(savedSubflows.value);
+  }
+
+  async function refreshRunHistory(sourceWorkflows = workflows) {
+    const workflowsToLoad = sourceWorkflows.slice(0, 25);
+    if (!workflowsToLoad.length) {
+      setRecentRuns([]);
+      return;
+    }
+    const runResults = await Promise.allSettled(workflowsToLoad.map((workflow) => listWorkflowRuns(workflow.id)));
+    const runs = runResults
+      .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
+      .sort((left, right) => {
+        const leftTime = new Date(left.started_at || "").getTime() || left.id;
+        const rightTime = new Date(right.started_at || "").getTime() || right.id;
+        return rightTime - leftTime;
+      })
+      .slice(0, 80);
+    setRecentRuns(runs);
+  }
+
+  async function uploadMainPageFiles(fileList: FileList | null) {
+    const selectedFiles = fileList ? Array.from(fileList) : [];
+    if (!selectedFiles.length) return;
+    setIsFileUploading(true);
+    setStatusMessage(`Uploading ${selectedFiles.length} file(s) to File Library.`);
+    try {
+      await Promise.all(selectedFiles.map((file) => uploadLibraryFile(file)));
+      setFileLibrary(await listFiles());
+      setStatusMessage(`${selectedFiles.length} file(s) uploaded. They are now selectable from File Upload blocks in Builder and App Run pages.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not upload file(s).");
+    } finally {
+      setIsFileUploading(false);
+    }
   }
 
   async function publishAndOpen(workflowId: number) {
@@ -221,6 +299,21 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     }
   }
 
+  async function createGuidedWorkflow(recipe: { name: string; prompt: string }) {
+    if (!currentUser) {
+      setStatusMessage("Login locally before creating guided workflows.");
+      return;
+    }
+    try {
+      setStatusMessage(`Building ${recipe.name}.`);
+      const workflow = await autoBuildWorkflow({ name: recipe.name, prompt: recipe.prompt });
+      await refreshAll();
+      onOpenWorkflow(workflow.id);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not auto-build workflow.");
+    }
+  }
+
   async function lifecycleAction(action: "archive" | "restore" | "delete" | "duplicate", workflow: WorkflowSummary) {
     try {
       if (action === "archive") {
@@ -263,9 +356,9 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     }
   }
 
-  async function compareVersion(workflowId: number, versionId: number) {
+  async function compareVersion(workflowId: number, versionId: number, base: "previous" | "current" = "previous") {
     try {
-      setVersionCompare(await compareWorkflowVersion(workflowId, versionId));
+      setVersionCompare(await compareWorkflowVersion(workflowId, versionId, base));
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Could not compare workflow version.");
     }
@@ -277,6 +370,55 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
       setPermissions(await listWorkflowPermissions(workflow.id));
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Could not load permissions.");
+    }
+  }
+
+  async function openCollaboration(workflow: WorkflowSummary) {
+    try {
+      const [details, comments, history, savedSubflows] = await Promise.all([
+        getWorkflow(workflow.id),
+        listWorkflowComments(workflow.id),
+        listWorkflowHistory(workflow.id),
+        listSubflows(),
+      ]);
+      setCollaborationWorkflow(details);
+      setWorkflowComments(comments);
+      setWorkflowHistory(history);
+      setSubflows(savedSubflows.filter((subflow) => subflow.workflow_id === workflow.id));
+      setSubflowName(`${workflow.name} Component`);
+      setCommentBody("");
+      setStatusMessage(`Loaded collaboration activity for ${workflow.name}.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not load collaboration details.");
+    }
+  }
+
+  async function submitComment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!collaborationWorkflow || !commentBody.trim()) return;
+    try {
+      await createWorkflowComment(collaborationWorkflow.id, { body: commentBody.trim() });
+      const comments = await listWorkflowComments(collaborationWorkflow.id);
+      setWorkflowComments(comments);
+      setCommentBody("");
+      setStatusMessage("Comment added to workflow activity.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not add comment.");
+    }
+  }
+
+  async function saveWorkflowAsSubflow() {
+    if (!collaborationWorkflow) return;
+    try {
+      const subflow = await createWorkflowSubflow(collaborationWorkflow.id, {
+        name: subflowName.trim() || `${collaborationWorkflow.name} Component`,
+        description: "Reusable component saved from the workflow collaboration panel.",
+        graph_json: collaborationWorkflow.graph_json,
+      });
+      setSubflows((current) => [subflow, ...current]);
+      setStatusMessage(`Saved reusable component "${subflow.name}".`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not save reusable component.");
     }
   }
 
@@ -379,8 +521,11 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     { id: "create", label: "Create", short: "CR", detail: "wizard" },
     { id: "templates", label: "Templates", short: "TP", detail: `${templates.length} recipes` },
     { id: "usage", label: "Usage", short: "US", detail: `${usage?.totals.runs || 0} runs` },
+    { id: "runs", label: "Runs", short: "RN", detail: `${recentRuns.length} recent` },
     { id: "publish", label: "Publish", short: "PB", detail: `${publishedChatbots.length} live` },
+    { id: "files", label: "Files", short: "FL", detail: `${fileLibrary.length} uploads` },
     { id: "knowledge", label: "Knowledge", short: "KG", detail: `${globalKnowledge.length} collections` },
+    { id: "components", label: "Components", short: "CP", detail: `${allSubflows.length} saved` },
     { id: "marketplace", label: "Blocks", short: "BX", detail: `${marketplaceBlocks.length} blocks` },
     { id: "health", label: "Health", short: "HL", detail: systemHealth ? "checked" : "setup" },
     { id: "bundle", label: "Bundles", short: "BD", detail: "import/export" },
@@ -391,8 +536,11 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     create: "Create a workflow workspace",
     templates: "Launch from proven blueprints",
     usage: "Read the studio pulse",
+    runs: "Inspect execution history",
     publish: "Ship local chatbot endpoints",
+    files: "Prepare documents for workflows",
     knowledge: "Manage local RAG collections",
+    components: "Reuse saved workflow parts",
     marketplace: "Browse block capabilities",
     health: "Check studio readiness",
     bundle: "Move workflows safely",
@@ -403,13 +551,54 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     create: "Start blank or clone an advanced template with ownership, app URLs, and future publishing already wired.",
     templates: "Turn advanced sample workflows into editable workspaces without rebuilding the graph by hand.",
     usage: "Monitor users, runs, failures, latency, files, and RAG activity from the local SQLite app database.",
+    runs: "Review recent workflow executions, statuses, errors, timings, owners, and open clean run detail pages.",
     publish: "Manage live chatbot links, API snippets, unpublish actions, and quick test launches.",
+    files: "Upload documents once, then reuse them from File Upload blocks while building or running workflows.",
     knowledge: "Inspect all RAG collections, chunk counts, ingest freshness, and jump to the owning workflow.",
+    components: "Browse reusable subflows/components saved from workflow activity panels.",
     marketplace: "See implemented and upcoming blocks, their ports, config fields, and extension phase.",
     health: "Validate SQLite, local storage, Chroma, OpenRouter, embedding, and environment configuration.",
     bundle: "Export project bundles or import a workflow JSON bundle into a fresh editable workspace.",
     account: "Use local-first login so created workflows, runs, and publish actions have clear ownership.",
   };
+  const guidedRecipes = [
+    {
+      name: "Document Q&A Assistant",
+      prompt: "Build a document upload workflow with file upload, text extraction, RAG ingestion and retrieval, reranker, chatbot with citations, chat output, JSON output, dashboard preview, and logger.",
+      badge: "File + RAG + Chat",
+    },
+    {
+      name: "AI Field Extractor",
+      prompt: "Build a workflow that uploads documents, extracts text, uses Extraction AI to return structured JSON fields, validates schema, shows dashboard preview, exports JSON, and logs errors.",
+      badge: "Files to JSON",
+    },
+    {
+      name: "Persistent Support Chatbot",
+      prompt: "Build a persistent chatbot with chat input, conversation memory, query rewriting, optional RAG context, OpenRouter chatbot, citation verifier, chat output, and logger.",
+      badge: "Memory chatbot",
+    },
+    {
+      name: "Approval + Routing Flow",
+      prompt: "Build an automation workflow with form input, condition/router, human approval step, chatbot summary, notification, JSON output, and logger.",
+      badge: "Automation",
+    },
+  ];
+  const templateProducts = [
+    { match: "document", title: "Document Ops Copilot", tag: "Upload -> RAG -> Answer", tone: "bg-lime/30" },
+    { match: "extractor", title: "AI Field Extractor", tag: "Upload -> JSON", tone: "bg-sand/60" },
+    { match: "chat", title: "Persistent Chatbot", tag: "Memory + citations", tone: "bg-mist" },
+    { match: "rag", title: "Multi-RAG Assistant", tag: "Knowledge retrieval", tone: "bg-lime/20" },
+    { match: "approval", title: "Approval Automation", tag: "Route + human step", tone: "bg-coral/15" },
+  ];
+
+  function getTemplateProduct(template: WorkflowSummary) {
+    const name = template.name.toLowerCase();
+    return templateProducts.find((product) => name.includes(product.match)) || {
+      title: template.name.replace("Advanced: ", ""),
+      tag: template.workflow_type || "Workflow template",
+      tone: "bg-white",
+    };
+  }
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -566,6 +755,21 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                 Blank AI workflow
                 <span className="mt-1 block text-xs font-semibold text-ink/55">Chat input, memory, chatbot, and output starter graph.</span>
               </button>
+              <div className="mt-4 grid gap-2">
+                {guidedRecipes.map((recipe) => (
+                  <button
+                    key={recipe.name}
+                    type="button"
+                    onClick={() => void createGuidedWorkflow(recipe)}
+                    className="rounded-[1.25rem] bg-white/10 px-4 py-3 text-left text-sm font-semibold text-white ring-1 ring-white/10 transition hover:bg-white/15"
+                  >
+                    {recipe.name}
+                    <span className="ml-2 rounded-full bg-lime/25 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-lime">
+                      {recipe.badge}
+                    </span>
+                  </button>
+                ))}
+              </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <InfoCard title="Pre-run Checklist" body="The app run page validates files, API key hints, and required inputs before execution." />
                 <InfoCard title="Shareable App URL" body="Every workflow gets /app/:workflowId for file forms, chat forms, dashboards, and clean outputs." />
@@ -681,7 +885,114 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
             )}
           </div>
 
+          <div className="space-y-4">
+            <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Observability</p>
+              <h3 className="mt-2 text-xl font-bold text-ink">Health signals</h3>
+              {observability ? (
+                <div className="mt-4 grid gap-2">
+                  {Object.entries(observability.metrics).slice(0, 8).map(([key, value]) => (
+                    <div key={key} className="flex items-center justify-between rounded-2xl bg-mist/70 px-3 py-2 text-sm">
+                      <span className="text-ink/58">{key.replace(/_/g, " ")}</span>
+                      <span className="font-semibold text-ink">{String(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-4 rounded-2xl bg-mist/70 p-3 text-sm text-ink/55">No observability metrics yet.</p>
+              )}
+            </div>
+
+            <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Audit Trail</p>
+              <h3 className="mt-2 text-xl font-bold text-ink">Recent access and changes</h3>
+              <div className="mt-4 space-y-2">
+                {auditLogs.length ? auditLogs.map((event) => (
+                  <div key={event.id} className="rounded-2xl bg-mist/70 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-semibold text-ink">{event.action.replace(/_/g, " ")}</span>
+                      <span className="text-[11px] text-ink/45">{new Date(event.created_at).toLocaleString()}</span>
+                    </div>
+                    <p className="mt-1 truncate text-xs text-ink/55">
+                      user {event.user_id ?? "local"} · {event.resource_type}{event.resource_id ? ` #${event.resource_id}` : ""}
+                    </p>
+                  </div>
+                )) : (
+                  <p className="rounded-2xl bg-mist/70 p-3 text-sm text-ink/55">No audit events recorded yet.</p>
+                )}
+              </div>
+            </div>
+          </div>
+
         </section>
+        ) : null}
+
+        {activeView === "runs" ? (
+          <section className="mt-6 rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel backdrop-blur">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Run History</p>
+                <h2 className="mt-2 text-2xl font-bold">Recent executions</h2>
+                <p className="mt-1 text-sm text-ink/58">A cross-workflow view powered by each workflow's run history endpoint.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshRunHistory()}
+                className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+              >
+                Refresh Runs
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3">
+              {recentRuns.map((run) => {
+                const workflow = workflows.find((item) => item.id === run.workflow_id);
+                return (
+                  <article key={`${run.workflow_id}-${run.id}`} className="rounded-[1.45rem] bg-white p-4 ring-1 ring-ink/6">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink/42">
+                          Run #{run.id} · workflow #{run.workflow_id}
+                        </p>
+                        <h3 className="mt-1 truncate text-lg font-semibold text-ink">{workflow?.name || "Workflow"}</h3>
+                        <p className="mt-1 text-sm text-ink/55">
+                          {run.trigger_mode || "manual"} · {run.node_runs?.length || 0} node(s) · owner {run.owner_user_id ?? "local"}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${run.status === "completed" ? "bg-lime/35 text-ink" : run.status === "failed" ? "bg-coral/20 text-ink" : "bg-sand/70 text-ink"}`}>
+                          {run.status}
+                        </span>
+                        <span className="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink/55">
+                          {run.latency_ms ? `${run.latency_ms}ms` : "pending"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            window.history.pushState({}, "", `/runs/${run.workflow_id}/${run.id}`);
+                            window.dispatchEvent(new Event("vmb:navigate"));
+                          }}
+                          className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+                        >
+                          Open Run
+                        </button>
+                      </div>
+                    </div>
+                    {run.error_message ? (
+                      <p className="mt-3 rounded-2xl bg-coral/12 px-4 py-3 text-sm leading-6 text-ink">{run.error_message}</p>
+                    ) : null}
+                    <p className="mt-3 text-xs text-ink/48">
+                      Started {run.started_at ? new Date(run.started_at).toLocaleString() : "unknown"} · session {run.session_id || "n/a"}
+                    </p>
+                  </article>
+                );
+              })}
+              {!recentRuns.length ? (
+                <p className="rounded-[1.5rem] border border-dashed border-ink/15 bg-mist/70 p-5 text-sm leading-6 text-ink/58">
+                  No runs found yet. Run a workflow from Builder or App Preview and this tab will show the execution history.
+                </p>
+              ) : null}
+            </div>
+          </section>
         ) : null}
 
         {activeView === "templates" || activeView === "publish" ? (
@@ -698,20 +1009,35 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                 {templates.length} templates
               </span>
             </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {templates.slice(0, 6).map((template) => (
-                <button
-                  key={template.id}
-                  type="button"
-                  onClick={() => void createFromTemplate(template.id)}
-                  className="rounded-[1.4rem] border border-ink/8 bg-[linear-gradient(180deg,_#ffffff,_#fbfcf8)] p-4 text-left transition hover:-translate-y-0.5 hover:shadow-lg"
-                >
-                  <p className="text-sm font-semibold text-ink">{template.name.replace("Advanced: ", "")}</p>
-                  <p className="mt-2 text-xs leading-5 text-ink/56">
-                    {template.run_count} runs · {template.rag_chunk_count} RAG chunks · {template.is_published ? "publishable" : "builder workflow"}
-                  </p>
-                </button>
-              ))}
+            <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {templates.slice(0, 9).map((template) => {
+                const product = getTemplateProduct(template);
+                return (
+                  <article
+                    key={template.id}
+                    className="rounded-[1.6rem] border border-ink/8 bg-[linear-gradient(180deg,_#ffffff,_#fbfcf8)] p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg"
+                  >
+                    <div className={`rounded-[1.25rem] ${product.tone} p-4`}>
+                      <p className="text-xs font-semibold uppercase tracking-[0.26em] text-ink/45">Template</p>
+                      <h3 className="mt-2 text-xl font-bold text-ink">{product.title}</h3>
+                      <p className="mt-2 text-sm font-semibold text-ink/62">{product.tag}</p>
+                    </div>
+                    <p className="mt-4 text-sm font-semibold text-ink">{template.name.replace("Advanced: ", "")}</p>
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{template.run_count} runs</span>
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{template.rag_chunk_count} chunks</span>
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{template.quality_score}% quality</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void createFromTemplate(template.id)}
+                      className="mt-4 w-full rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white"
+                    >
+                      Create Workspace
+                    </button>
+                  </article>
+                );
+              })}
               {!templates.length ? (
                 <p className="rounded-[1.4rem] bg-mist/70 p-4 text-sm text-ink/58">
                   Run the sample seeder to populate advanced templates.
@@ -733,11 +1059,12 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                 {publishedChatbots.length} live
               </span>
             </div>
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {publishedChatbots.map((workflow) => (
-                <div key={workflow.id} className="rounded-[1.4rem] bg-white p-4 ring-1 ring-ink/6">
+                <div key={workflow.id} className="rounded-[1.5rem] bg-white p-4 ring-1 ring-ink/6">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink/42">Published Chatbot</p>
                       <p className="truncate text-sm font-semibold">{workflow.name}</p>
                       <button
                         type="button"
@@ -762,6 +1089,14 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   body: JSON.stringify({ message, session_id, user_id })
 })`}
                   </pre>
+                  <pre className="mt-3 overflow-auto rounded-2xl bg-ink p-3 text-[11px] text-white/75">
+                    {`<iframe src="${workflow.published_slug ? getChatUrl(workflow.published_slug) : ""}" style="width:100%;height:640px;border:0;border-radius:24px;"></iframe>`}
+                  </pre>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    <span className="rounded-xl bg-mist/70 px-3 py-2">{workflow.current_version ? `v${workflow.current_version}` : "draft"}</span>
+                    <span className="rounded-xl bg-mist/70 px-3 py-2">{workflow.run_count} runs</span>
+                    <span className="rounded-xl bg-mist/70 px-3 py-2">{workflow.quality_score}% quality</span>
+                  </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -784,7 +1119,31 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     >
                       Copy API
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => workflow.published_slug && void copyText(`<iframe src="${getChatUrl(workflow.published_slug)}" style="width:100%;height:640px;border:0;border-radius:24px;"></iframe>`)}
+                      className="rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink"
+                    >
+                      Copy Embed
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenWorkflowApp(workflow.id)}
+                      className="rounded-full bg-lime/35 px-3 py-1.5 text-xs font-semibold text-ink"
+                    >
+                      App Preview
+                    </button>
                   </div>
+                </div>
+              ))}
+              {workflows.filter((workflow) => !workflow.is_published && workflowKinds[workflow.id] === "chat").slice(0, 4).map((workflow) => (
+                <div key={`candidate-${workflow.id}`} className="rounded-[1.5rem] border border-dashed border-ink/15 bg-mist/60 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink/42">Ready To Publish</p>
+                  <h3 className="mt-2 text-lg font-semibold">{workflow.name}</h3>
+                  <p className="mt-2 text-sm leading-6 text-ink/58">This chat workflow has the right output shape. Publish it to create a chatbot link, API endpoint, and embed snippet.</p>
+                  <button type="button" onClick={() => void publishAndOpen(workflow.id)} className="mt-4 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
+                    Publish Chatbot
+                  </button>
                 </div>
               ))}
               {!publishedChatbots.length ? (
@@ -842,6 +1201,137 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
               ))}
               {!globalKnowledge.length ? (
                 <p className="rounded-[1.5rem] bg-mist/70 p-5 text-sm text-ink/58">No RAG collections yet. Run a file upload → text extraction → RAG ingest workflow.</p>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === "files" ? (
+          <section className="mt-6 grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+            <aside className="rounded-[2rem] border border-white/70 bg-ink p-5 text-white shadow-panel">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/45">File Library</p>
+              <h2 className="mt-2 text-3xl font-bold">Upload once, reuse anywhere</h2>
+              <p className="mt-3 text-sm leading-6 text-white/62">
+                Add local documents here before building. Builder and workflow run file inputs can select these records directly without asking again.
+              </p>
+              <label className="mt-5 block rounded-[1.5rem] border border-dashed border-white/20 bg-white/8 p-4 text-sm font-semibold">
+                Upload Documents
+                <span className="mt-1 block text-xs font-normal leading-5 text-white/50">
+                  PDF, DOCX, TXT, CSV, JSON. Stored locally under your configured storage folder.
+                </span>
+                <input
+                  type="file"
+                  multiple
+                  accept=".pdf,.docx,.txt,.csv,.json"
+                  disabled={isFileUploading}
+                  onChange={(event) => {
+                    void uploadMainPageFiles(event.target.files);
+                    event.target.value = "";
+                  }}
+                  className="mt-3 w-full text-xs text-white/70 file:mr-3 file:rounded-full file:border-0 file:bg-lime file:px-3 file:py-2 file:text-xs file:font-bold file:text-ink disabled:opacity-50"
+                />
+              </label>
+              <button type="button" onClick={onOpenFiles} className="mt-3 w-full rounded-2xl bg-white/10 px-4 py-3 text-sm font-semibold text-white">
+                Open Detailed File Library
+              </button>
+            </aside>
+
+            <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Reusable Documents</p>
+                  <h2 className="mt-2 text-2xl font-bold">Files available to workflows</h2>
+                  <p className="mt-1 text-sm text-ink/58">Use the Builder inspector's Inputs tab or an App Run file input to pick these files.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void listFiles().then(setFileLibrary)}
+                  className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+                >
+                  Refresh Files
+                </button>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {fileLibrary.map((file) => (
+                  <article key={file.id} className="rounded-[1.45rem] bg-white p-4 ring-1 ring-ink/6">
+                    <p className="truncate text-sm font-semibold text-ink">{file.original_name}</p>
+                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-ink/45">
+                      {file.extension} · {(file.size_bytes / 1024).toFixed(1)} KB
+                    </p>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{file.workflow_id ? `workflow #${file.workflow_id}` : "global file"}</span>
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{file.knowledge_document_count} docs</span>
+                    </div>
+                    <p className="mt-3 break-all rounded-2xl bg-mist/55 px-3 py-2 text-[11px] leading-5 text-ink/50">
+                      {file.storage_path}
+                    </p>
+                  </article>
+                ))}
+                {!fileLibrary.length ? (
+                  <p className="rounded-[1.5rem] border border-dashed border-ink/15 bg-mist/70 p-5 text-sm leading-6 text-ink/58">
+                    No files yet. Upload documents here, then open a workflow with a File Upload block and choose them from the File Library picker.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === "components" ? (
+          <section className="mt-6 rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel backdrop-blur">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Reusable Components</p>
+                <h2 className="mt-2 text-2xl font-bold">Saved subflows</h2>
+                <p className="mt-1 text-sm text-ink/58">Components are saved from a workflow's Activity panel and can become reusable block groups.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void listSubflows().then(setAllSubflows)}
+                className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+              >
+                Refresh Components
+              </button>
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {allSubflows.map((subflow) => {
+                const workflow = workflows.find((item) => item.id === subflow.workflow_id);
+                const nodeCount = subflow.graph_json?.nodes?.length || 0;
+                const edgeCount = subflow.graph_json?.edges?.length || 0;
+                return (
+                  <article key={subflow.id} className="rounded-[1.55rem] bg-white p-4 ring-1 ring-ink/6">
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink/42">Component #{subflow.id}</p>
+                    <h3 className="mt-2 text-lg font-semibold text-ink">{subflow.name}</h3>
+                    <p className="mt-2 text-sm leading-6 text-ink/58">
+                      {subflow.description || "Reusable graph component saved from workflow activity."}
+                    </p>
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-ink/60">
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{nodeCount} nodes</span>
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{edgeCount} edges</span>
+                      <span className="rounded-xl bg-mist/70 px-3 py-2">{workflow?.name ? "linked" : "global"}</span>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {subflow.workflow_id ? (
+                        <button type="button" onClick={() => onOpenWorkflow(subflow.workflow_id)} className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
+                          Open Source Workflow
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => void copyText(JSON.stringify(subflow.graph_json || {}, null, 2))}
+                        className="rounded-full bg-mist px-4 py-2 text-sm font-semibold text-ink"
+                      >
+                        Copy Graph JSON
+                      </button>
+                    </div>
+                    <p className="mt-3 text-xs text-ink/45">{new Date(subflow.created_at).toLocaleString()}</p>
+                  </article>
+                );
+              })}
+              {!allSubflows.length ? (
+                <p className="rounded-[1.5rem] border border-dashed border-ink/15 bg-mist/70 p-5 text-sm leading-6 text-ink/58">
+                  No components saved yet. Open a workflow card, choose Activity, and save the workflow as a reusable component.
+                </p>
               ) : null}
             </div>
           </section>
@@ -981,6 +1471,66 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
             </div>
           </div>
 
+          <div className="mb-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <WorkflowStatCard label="Total Workflows" value={workflows.length} detail={`${filteredWorkflows.length} visible`} />
+            <WorkflowStatCard label="Runs" value={usage?.totals.runs || 0} detail={`${usage?.totals.failed_runs || 0} failed`} />
+            <WorkflowStatCard label="RAG Chunks" value={globalKnowledge.reduce((total, item) => total + item.chunk_count, 0)} detail={`${globalKnowledge.length} collections`} />
+            <WorkflowStatCard label="Audit Events" value={auditLogs.length} detail="recent activity" />
+          </div>
+
+          <div className="mb-5 grid gap-4 xl:grid-cols-[1fr_360px]">
+            <div className="rounded-[1.5rem] bg-white p-4 ring-1 ring-ink/6">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.28em] text-ink/42">Studio Overview</p>
+                  <h3 className="mt-1 text-lg font-semibold text-ink">What needs attention</h3>
+                </div>
+                <button type="button" onClick={() => setActiveView("usage")} className="rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink">
+                  Full Dashboard
+                </button>
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                <AttentionCard
+                  title="Quality"
+                  body={`${workflows.filter((workflow) => workflow.quality_score < 70).length} workflow(s) below 70% quality`}
+                  tone="bg-sand/45"
+                />
+                <AttentionCard
+                  title="RAG"
+                  body={`${workflows.filter((workflow) => workflow.workflow_type === "rag" && workflow.rag_chunk_count === 0).length} RAG workflow(s) need ingest`}
+                  tone="bg-lime/20"
+                />
+                <AttentionCard
+                  title="Publishing"
+                  body={`${workflows.filter((workflow) => workflowKinds[workflow.id] === "chat" && !workflow.is_published).length} chat workflow(s) ready to publish`}
+                  tone="bg-mist/80"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-[1.5rem] bg-ink p-4 text-white">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.28em] text-white/42">Audit</p>
+                  <h3 className="mt-1 text-lg font-semibold">Recent activity</h3>
+                </div>
+                <button type="button" onClick={() => void refreshUsage()} className="rounded-full bg-white/10 px-3 py-2 text-xs font-semibold text-white">
+                  Refresh
+                </button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {auditLogs.slice(0, 5).map((event) => (
+                  <AuditEventCard key={event.id} event={event} />
+                ))}
+                {!auditLogs.length ? (
+                  <p className="rounded-2xl bg-white/8 px-3 py-3 text-sm leading-6 text-white/58">
+                    No audit events yet. Create, run, update, preview files, or test RAG to populate activity here.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
           {isLoading ? (
             <div className="rounded-[1.6rem] bg-mist/80 p-8 text-sm text-ink/62">
               Loading the workflow library...
@@ -1059,9 +1609,28 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                         workflow.is_published ? "bg-lime/40 text-ink" : "bg-mist text-ink/60"
                       }`}
                     >
-                      {workflow.is_published ? "Published" : workflow.status}
+                      {workflow.is_published ? "Published" : workflow.workflow_type || workflow.status}
                     </span>
                   </div>
+
+                  <div className="mt-4 grid gap-2 sm:grid-cols-[120px_1fr]">
+                    <div className={`rounded-2xl px-4 py-3 ${workflow.quality_score >= 75 ? "bg-lime/25" : workflow.quality_score >= 50 ? "bg-sand/60" : "bg-coral/15"}`}>
+                      <span className="block text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Quality</span>
+                      <strong className="mt-1 block text-2xl text-ink">{workflow.quality_score}%</strong>
+                    </div>
+                    <div className="rounded-2xl bg-white px-4 py-3 ring-1 ring-ink/6">
+                      <span className="block text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Last Output</span>
+                      <p className="mt-1 max-h-11 overflow-hidden text-sm leading-5 text-ink/62">
+                        {workflow.last_run_preview || "Run this workflow to see the latest output preview here."}
+                      </p>
+                    </div>
+                  </div>
+                  {workflow.quality_recommendations?.length ? (
+                    <div className="mt-3 rounded-2xl bg-sand/45 px-4 py-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-ink/45">Next Best Fix</p>
+                      <p className="mt-1 text-sm leading-5 text-ink/66">{workflow.quality_recommendations[0]}</p>
+                    </div>
+                  ) : null}
 
                   <div className="mt-5 grid gap-2 text-sm text-ink/60 sm:grid-cols-2">
                     <div className="rounded-2xl bg-mist/70 px-4 py-3">
@@ -1189,6 +1758,13 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                       className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
                     >
                       Permissions
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void openCollaboration(workflow)}
+                      className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
+                    >
+                      Activity
                     </button>
                     <button
                       type="button"
@@ -1353,32 +1929,167 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     </button>
                     <button
                       type="button"
-                      onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id)}
+                      onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id, "previous")}
                       className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
                     >
-                      Compare
+                      Compare Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id, "current")}
+                      className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
+                    >
+                      Compare Current
                     </button>
                   </div>
                   {versionCompare?.version_id === version.id ? (
                     <div className="mt-3 rounded-2xl bg-white p-3 text-xs text-ink/62">
-                      <p className="font-semibold text-ink">Diff against current graph</p>
-                      <p className="mt-2">
+                      <p className="font-semibold text-ink">
+                        Changes in version {versionCompare.version_number} vs {versionCompare.comparison_label}
+                      </p>
+                      <p className="mt-1 text-ink/50">
+                        Use Compare Previous to see what this save introduced. Use Compare Current to see restore impact.
+                      </p>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                        <DiffMetric label="Added Nodes" value={versionCompare.diff.added_nodes.length} tone="bg-lime/25" />
+                        <DiffMetric label="Removed Nodes" value={versionCompare.diff.removed_nodes.length} tone="bg-coral/15" />
+                        <DiffMetric label="Changed Nodes" value={versionCompare.diff.changed_nodes.length} tone="bg-sand/55" />
+                      </div>
+                      <div className="mt-3 grid gap-2 md:grid-cols-3">
+                        <DiffList title="Added" items={versionCompare.diff.added_nodes} />
+                        <DiffList title="Removed" items={versionCompare.diff.removed_nodes} />
+                        <DiffList title="Changed" items={versionCompare.diff.changed_nodes.map((node) => `${node.node_id}: ${node.changes.join(", ")}`)} />
+                      </div>
+                      <div className="mt-3 rounded-xl bg-mist/70 p-3">
                         {Object.entries(versionCompare.diff.summary)
                           .map(([key, value]) => `${key.replace(/_/g, " ")}: ${value}`)
                           .join(" · ")}
-                      </p>
-                      {versionCompare.diff.changed_nodes.length ? (
-                        <p className="mt-2">Changed nodes: {versionCompare.diff.changed_nodes.map((node) => `${node.node_id} (${node.changes.join(", ")})`).join("; ")}</p>
-                      ) : null}
+                      </div>
                     </div>
                   ) : null}
                 </div>
               )) : (
                 <p className="rounded-[1.4rem] bg-mist/70 p-4 text-sm text-ink/58">
-                  No saved versions yet. Use Save Version from the workflow API or future builder controls.
+                  No saved versions yet. Open Builder, click Save, add a version note, and AI Studio will create the first saved version.
                 </p>
               )}
             </div>
+          </div>
+        </div>
+      ) : null}
+      {collaborationWorkflow ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/28 p-4 backdrop-blur-sm">
+          <div className="max-h-[86vh] w-full max-w-5xl overflow-auto rounded-[2rem] bg-white p-5 shadow-panel">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Workflow Activity</p>
+                <h2 className="mt-2 text-2xl font-bold">{collaborationWorkflow.name}</h2>
+                <p className="mt-1 text-sm text-ink/58">
+                  Comments, change history, and reusable components are powered by the backend collaboration APIs.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCollaborationWorkflow(null)}
+                className="rounded-full bg-mist px-4 py-2 text-sm font-semibold"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-[1fr_1fr]">
+              <section className="rounded-[1.6rem] bg-mist/70 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-ink">Comments</p>
+                    <p className="mt-1 text-xs text-ink/55">Leave review notes for the workflow or future node-specific comments.</p>
+                  </div>
+                  <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-ink/55">
+                    {workflowComments.length}
+                  </span>
+                </div>
+                <form onSubmit={submitComment} className="mt-3">
+                  <textarea
+                    value={commentBody}
+                    onChange={(event) => setCommentBody(event.target.value)}
+                    placeholder="Add a note for reviewers, collaborators, or future you..."
+                    className="min-h-24 w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none"
+                  />
+                  <button type="submit" className="mt-2 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
+                    Add Comment
+                  </button>
+                </form>
+                <div className="mt-4 max-h-72 space-y-2 overflow-auto">
+                  {workflowComments.map((comment) => (
+                    <article key={comment.id} className="rounded-2xl bg-white px-4 py-3 text-sm ring-1 ring-ink/6">
+                      <p className="leading-6 text-ink">{comment.body}</p>
+                      <p className="mt-2 text-xs text-ink/45">
+                        user {comment.user_id ?? "local"} · {new Date(comment.created_at).toLocaleString()}
+                      </p>
+                    </article>
+                  ))}
+                  {!workflowComments.length ? (
+                    <p className="rounded-2xl bg-white px-4 py-3 text-sm text-ink/55">No comments yet.</p>
+                  ) : null}
+                </div>
+              </section>
+
+              <section className="rounded-[1.6rem] bg-ink p-4 text-white">
+                <p className="text-sm font-semibold">Reusable Components</p>
+                <p className="mt-1 text-xs leading-5 text-white/55">
+                  Save the current workflow graph as a subflow/component so later UI can insert it as a reusable block group.
+                </p>
+                <div className="mt-3 flex gap-2">
+                  <input
+                    value={subflowName}
+                    onChange={(event) => setSubflowName(event.target.value)}
+                    className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white outline-none"
+                  />
+                  <button type="button" onClick={() => void saveWorkflowAsSubflow()} className="rounded-2xl bg-lime px-4 py-3 text-sm font-bold text-ink">
+                    Save
+                  </button>
+                </div>
+                <div className="mt-4 max-h-72 space-y-2 overflow-auto">
+                  {subflows.map((subflow) => (
+                    <div key={subflow.id} className="rounded-2xl bg-white/10 px-4 py-3 text-sm">
+                      <p className="font-semibold">{subflow.name}</p>
+                      <p className="mt-1 text-xs text-white/45">{new Date(subflow.created_at).toLocaleString()}</p>
+                    </div>
+                  ))}
+                  {!subflows.length ? (
+                    <p className="rounded-2xl bg-white/10 px-4 py-3 text-sm text-white/55">
+                      No reusable components saved for this workflow yet.
+                    </p>
+                  ) : null}
+                </div>
+              </section>
+            </div>
+
+            <section className="mt-4 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-ink">Change History</p>
+                  <p className="mt-1 text-xs text-ink/55">Audit-friendly timeline of workflow creates, updates, versions, comments, and subflows.</p>
+                </div>
+                <span className="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink/55">
+                  {workflowHistory.length} events
+                </span>
+              </div>
+              <div className="mt-3 max-h-80 space-y-2 overflow-auto">
+                {workflowHistory.map((event) => (
+                  <article key={event.id} className="rounded-2xl bg-mist/70 px-4 py-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-semibold">{event.change_type.replace(/_/g, " ")}</p>
+                      <p className="text-xs text-ink/45">{new Date(event.created_at).toLocaleString()}</p>
+                    </div>
+                    <p className="mt-1 leading-5 text-ink/62">{event.summary}</p>
+                  </article>
+                ))}
+                {!workflowHistory.length ? (
+                  <p className="rounded-2xl bg-mist/70 px-4 py-3 text-sm text-ink/55">No change events recorded yet.</p>
+                ) : null}
+              </div>
+            </section>
           </div>
         </div>
       ) : null}
@@ -1389,7 +2100,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Workflow Permissions</p>
                 <h2 className="mt-2 text-2xl font-bold">{permissionWorkflow.name}</h2>
-                <p className="mt-1 text-sm text-ink/58">MVP sharing metadata for local users. Enforcement can be tightened as teams move beyond local-first testing.</p>
+                <p className="mt-1 text-sm text-ink/58">Local access control is enforced by the API when a local user is signed in. Add viewer, runner, editor, or owner access for teammates.</p>
               </div>
               <button type="button" onClick={() => setPermissionWorkflow(null)} className="rounded-full bg-mist px-4 py-2 text-sm font-semibold">
                 Close
@@ -1452,6 +2163,65 @@ function MetricCard({ label, value, detail }: { label: string; value: string | n
       <p className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/42">{label}</p>
       <p className="mt-2 text-2xl font-bold text-white">{value}</p>
       <p className="mt-1 text-xs text-white/55">{detail}</p>
+    </div>
+  );
+}
+
+function DiffMetric({ label, value, tone }: { label: string; value: number; tone: string }) {
+  return (
+    <div className={`rounded-xl px-3 py-2 ${tone}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-ink/45">{label}</p>
+      <p className="mt-1 text-lg font-bold text-ink">{value}</p>
+    </div>
+  );
+}
+
+function DiffList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="rounded-xl bg-mist/60 p-3">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-ink/45">{title}</p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {items.length ? items.slice(0, 8).map((item) => (
+          <span key={item} className="rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-ink/65">
+            {item}
+          </span>
+        )) : (
+          <span className="text-xs text-ink/45">None</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowStatCard({ label, value, detail }: { label: string; value: string | number; detail: string }) {
+  return (
+    <div className="rounded-[1.35rem] bg-white px-4 py-3 ring-1 ring-ink/6">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-ink/42">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-ink">{value}</p>
+      <p className="mt-1 text-xs text-ink/52">{detail}</p>
+    </div>
+  );
+}
+
+function AttentionCard({ title, body, tone }: { title: string; body: string; tone: string }) {
+  return (
+    <div className={`rounded-2xl px-4 py-3 ${tone}`}>
+      <p className="text-sm font-semibold text-ink">{title}</p>
+      <p className="mt-1 text-xs leading-5 text-ink/60">{body}</p>
+    </div>
+  );
+}
+
+function AuditEventCard({ event }: { event: AuditLogRecord }) {
+  return (
+    <div className="rounded-2xl bg-white/8 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <p className="truncate text-sm font-semibold text-white">{event.action.replace(/_/g, " ")}</p>
+        <span className="shrink-0 text-[10px] text-white/38">{new Date(event.created_at).toLocaleTimeString()}</span>
+      </div>
+      <p className="mt-1 truncate text-xs text-white/52">
+        {event.event_type} · {event.resource_type}{event.workflow_id ? ` · workflow #${event.workflow_id}` : ""}
+      </p>
     </div>
   );
 }

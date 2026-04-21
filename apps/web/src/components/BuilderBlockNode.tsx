@@ -68,6 +68,21 @@ export function BuilderBlockNode({ data }: NodeProps<BuilderBlockData>) {
           ))}
         </div>
       ) : null}
+      {data.runPreview ? (
+        <div className={`mt-3 rounded-2xl px-3 py-2 text-xs leading-5 ${
+          data.runPreview.status === "failed" ? "bg-coral/18 text-ink" : "bg-lime/25 text-ink"
+        }`}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold">{data.runPreview.status}</span>
+            {data.runPreview.latencyMs !== undefined && data.runPreview.latencyMs !== null ? (
+              <span className="text-ink/50">{data.runPreview.latencyMs}ms</span>
+            ) : null}
+          </div>
+          <p className="mt-1 max-h-10 overflow-hidden text-ink/65">
+            {data.runPreview.error || data.runPreview.summary || "Output produced."}
+          </p>
+        </div>
+      ) : null}
       {data.description ? (
         <p className="mt-2 max-h-10 overflow-hidden text-xs leading-5 text-ink/62">{data.description}</p>
       ) : null}

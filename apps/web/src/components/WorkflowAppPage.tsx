@@ -4,7 +4,9 @@ import {
   getRunEventsUrl,
   getWorkflow,
   getWorkflowRun,
+  listFiles,
   uploadRuntimeFile,
+  type FileLibraryItem,
   type RuntimeUploadResponse,
   type WorkflowRecord,
   type WorkflowRunRecord,
@@ -46,6 +48,7 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
   const [userId, setUserId] = useState("local-preview-user");
   const [defaultMessage, setDefaultMessage] = useState("Run this workflow with my uploaded document.");
   const [run, setRun] = useState<WorkflowRunRecord | null>(null);
+  const [libraryFiles, setLibraryFiles] = useState<FileLibraryItem[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [executionSteps, setExecutionSteps] = useState<Array<{ label: string; status: "pending" | "running" | "done" | "failed"; detail: string }>>([]);
   const [status, setStatus] = useState("Loading workflow app.");
@@ -59,9 +62,16 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
       .catch((error) => setStatus(explainError(error)));
   }, [workflowId]);
 
+  useEffect(() => {
+    listFiles()
+      .then((records) => setLibraryFiles(records.slice(0, 40)))
+      .catch(() => setLibraryFiles([]));
+  }, []);
+
   const runtimeNodes = (workflow?.graph_json.nodes || []).filter((node) =>
     ["chat_input", "text_input", "file_upload"].includes(node.data.blockType),
   );
+  const appKind = getWorkflowAppKind(workflow);
   const outputCards = getOutputCards(run, workflow);
 
   function getInputState(nodeId: string) {
@@ -126,7 +136,30 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
     }
   }
 
-  async function runWorkflowApp() {
+  function useLibraryFile(node: BuilderNode, file: FileLibraryItem) {
+    const uploadedFile: RuntimeUploadResponse = {
+      original_name: file.original_name,
+      stored_name: file.storage_path.split("/").pop() || file.original_name,
+      extension: file.extension,
+      mime_type: file.mime_type,
+      size_bytes: file.size_bytes,
+      storage_path: file.storage_path,
+      relative_storage_path: String(file.metadata?.relative_storage_path || file.storage_path),
+    };
+    setRuntimeInputs((current) => ({
+      ...current,
+      [node.id]: {
+        ...getInputState(node.id),
+        files: [],
+        uploadedFiles: [uploadedFile],
+        status: "ready",
+        error: undefined,
+      },
+    }));
+    setStatus(`${file.original_name} selected from File Library for ${node.data.label}.`);
+  }
+
+  async function runWorkflowApp(runtimeOverride?: RuntimeState, messageOverride?: string) {
     if (!workflow) {
       return;
     }
@@ -141,14 +174,15 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
 
     try {
       const inputs: Record<string, { value: string; files: string[]; metadata: Record<string, string> }> = {};
+      const sourceRuntime = runtimeOverride || runtimeInputs;
       for (const node of runtimeNodes) {
-        const state = getInputState(node.id);
+        const state = sourceRuntime[node.id] || getInputState(node.id);
         if (node.data.blockType === "file_upload" && !state.uploadedFiles.length && !node.data.config.defaultLocalPaths) {
           throw new Error(`File Upload node requires runtime file paths for ${node.data.label}.`);
         }
         if (node.data.blockType === "chat_input") {
           inputs[node.id] = {
-            value: state.value || defaultMessage,
+            value: state.value || messageOverride || defaultMessage,
             files: [],
             metadata: { source: "workflow-app" },
           };
@@ -209,6 +243,45 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
     }
   }
 
+  async function runSampleTest() {
+    const sampleMessage =
+      appKind === "chatbot"
+        ? "What can you help me with?"
+        : appKind === "document"
+          ? "Summarize this document and extract key fields."
+          : "Run a sample test and show the output.";
+    const sampleRuntime: RuntimeState = { ...runtimeInputs };
+    for (const node of runtimeNodes) {
+      if (node.data.blockType === "file_upload" && !sampleRuntime[node.id]?.uploadedFiles?.length) {
+        sampleRuntime[node.id] = {
+          value: "",
+          files: [],
+          uploadedFiles: [
+            {
+              original_name: "sample_full_stack_document_ops.txt",
+              stored_name: "sample_full_stack_document_ops.txt",
+              extension: ".txt",
+              mime_type: "text/plain",
+              size_bytes: 0,
+              storage_path: "storage/sample_full_stack_document_ops.txt",
+              relative_storage_path: "storage/sample_full_stack_document_ops.txt",
+            },
+          ],
+          status: "ready",
+        };
+      }
+      if (node.data.blockType === "chat_input" || node.data.blockType === "text_input") {
+        sampleRuntime[node.id] = {
+          ...getInputState(node.id),
+          value: sampleMessage,
+        };
+      }
+    }
+    setRuntimeInputs(sampleRuntime);
+    setDefaultMessage(sampleMessage);
+    await runWorkflowApp(sampleRuntime, sampleMessage);
+  }
+
   function waitForRunEvents(nextWorkflowId: number, runId: number) {
     return new Promise<WorkflowRunRecord>((resolve, reject) => {
       const source = new EventSource(getRunEventsUrl(nextWorkflowId, runId));
@@ -257,10 +330,10 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
               </button>
             ) : null}
           </div>
-          <p className="mt-6 text-xs font-semibold uppercase tracking-[0.34em] text-ink/45">Workflow App</p>
+          <p className="mt-6 text-xs font-semibold uppercase tracking-[0.34em] text-ink/45">{appKind} App</p>
           <h1 className="mt-2 text-4xl font-bold tracking-tight">{workflow?.name || `Workflow #${workflowId}`}</h1>
           <p className="mt-3 text-sm leading-6 text-ink/62">
-            {workflow?.description || "A shareable local app URL for file, text, dashboard, JSON, and agent workflows."}
+            {getWorkflowAppDescription(appKind, workflow?.description)}
           </p>
           <p className="mt-4 rounded-[1.35rem] bg-mist/80 p-3 text-sm font-semibold text-ink/72">{status}</p>
 
@@ -294,11 +367,19 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
               </div>
               <button
                 type="button"
-                onClick={runWorkflowApp}
+                onClick={() => void runWorkflowApp()}
                 disabled={isRunning || !workflow}
                 className="rounded-full bg-lime px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isRunning ? "Running..." : "Run App"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void runSampleTest()}
+                disabled={isRunning || !workflow}
+                className="rounded-full border border-ink/10 bg-white px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Run Sample Test
               </button>
             </div>
 
@@ -310,6 +391,8 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
                   state={getInputState(node.id)}
                   onValueChange={(value) => updateValue(node.id, value)}
                   onFilesChange={(files) => void updateFiles(node, files)}
+                  libraryFiles={libraryFiles}
+                  onUseLibraryFile={(file) => useLibraryFile(node, file)}
                 />
               )) : (
                 <p className="rounded-[1.5rem] bg-mist/70 p-5 text-sm text-ink/62">
@@ -363,11 +446,15 @@ function RuntimeInputCard({
   state,
   onValueChange,
   onFilesChange,
+  libraryFiles,
+  onUseLibraryFile,
 }: {
   node: BuilderNode;
   state: RuntimeState[string];
   onValueChange: (value: string) => void;
   onFilesChange: (files: FileList | null) => void;
+  libraryFiles: FileLibraryItem[];
+  onUseLibraryFile: (file: FileLibraryItem) => void;
 }) {
   return (
     <article className="rounded-[1.5rem] border border-ink/8 bg-white p-4 shadow-sm">
@@ -410,6 +497,24 @@ function RuntimeInputCard({
             <p className="mt-2 rounded-xl bg-lime/15 px-3 py-2 text-xs text-ink/62">
               Uses default local file if no upload is selected.
             </p>
+          ) : null}
+          {libraryFiles.length ? (
+            <div className="mt-4 rounded-2xl bg-mist/60 p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-ink/45">Select From File Library</p>
+              <div className="mt-2 max-h-40 space-y-2 overflow-auto">
+                {libraryFiles.map((file) => (
+                  <button
+                    key={file.id}
+                    type="button"
+                    onClick={() => onUseLibraryFile(file)}
+                    className="flex w-full items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-left text-xs font-semibold text-ink transition hover:bg-lime/25"
+                  >
+                    <span className="truncate">{file.original_name}</span>
+                    <span className="shrink-0 text-ink/45">{(file.size_bytes / 1024).toFixed(1)} KB</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : (
@@ -466,6 +571,24 @@ function PreRunChecklist({
       </div>
     </div>
   );
+}
+
+function getWorkflowAppKind(workflow: WorkflowRecord | null) {
+  const blockTypes = new Set((workflow?.graph_json.nodes || []).map((node) => node.data.blockType));
+  if (blockTypes.has("file_upload") && blockTypes.has("extraction_ai")) return "extractor";
+  if (blockTypes.has("file_upload")) return "document";
+  if (blockTypes.has("chat_input") && blockTypes.has("chat_output")) return "chatbot";
+  if (blockTypes.has("rag_knowledge")) return "rag";
+  return "workflow";
+}
+
+function getWorkflowAppDescription(kind: string, fallback?: string | null) {
+  if (fallback) return fallback;
+  if (kind === "chatbot") return "A chat-first app with session-aware memory and clean answer cards.";
+  if (kind === "document") return "A document-first app for upload, extraction, RAG, dashboard, and JSON workflows.";
+  if (kind === "extractor") return "A file-to-JSON app for extracting structured fields from documents.";
+  if (kind === "rag") return "A knowledge retrieval app for testing local collections and cited answers.";
+  return "A shareable local app URL for text, file, dashboard, JSON, and agent workflows.";
 }
 
 function ExecutionTimeline({

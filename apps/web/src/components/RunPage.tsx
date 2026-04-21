@@ -53,6 +53,9 @@ export function RunPage({ workflowId, runId, onBack }: RunPageProps) {
             <div className="space-y-5">
               <section className="rounded-[2rem] bg-white/85 p-5 shadow-panel">
                 <h2 className="text-xl font-semibold">Node Timeline</h2>
+                <p className="mt-3 rounded-2xl bg-lime/20 px-4 py-3 text-sm leading-6 text-ink">
+                  {explainWorkflowRun(run)}
+                </p>
                 <div className="mt-4 grid gap-3">
                   {(run.node_runs || []).map((nodeRun) => (
                     <article key={nodeRun.id} className="rounded-2xl border border-ink/8 bg-mist/60 p-4">
@@ -104,6 +107,22 @@ export function RunPage({ workflowId, runId, onBack }: RunPageProps) {
       </div>
     </main>
   );
+}
+
+function explainWorkflowRun(run: WorkflowRunRecord) {
+  const nodeRuns = run.node_runs || [];
+  const completed = nodeRuns.filter((node) => node.status === "completed").length;
+  const failed = nodeRuns.filter((node) => node.status === "failed").length;
+  const blockTypes = nodeRuns.map((node) => node.block_type);
+  const parts = [`${completed}/${nodeRuns.length || Object.keys(run.output_payload || {}).length} block(s) completed`];
+  if (blockTypes.includes("file_upload")) parts.push("files were staged locally");
+  if (blockTypes.includes("text_extraction")) parts.push("text was extracted");
+  if (blockTypes.includes("rag_knowledge")) parts.push("knowledge was indexed/retrieved");
+  if (blockTypes.includes("chatbot")) parts.push("an answer was generated");
+  if (blockTypes.includes("citation_verifier")) parts.push("citations were checked");
+  if (failed) parts.push(`${failed} block(s) failed`);
+  if (run.latency_ms) parts.push(`total latency ${run.latency_ms}ms`);
+  return parts.join(", ") + ".";
 }
 
 function getOutputCards(run: WorkflowRunRecord) {

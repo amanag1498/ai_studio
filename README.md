@@ -13,8 +13,11 @@ AI Studio is a local-first visual workflow builder for document, RAG, chatbot, e
 - Execute MVP blocks through a DAG engine with topological ordering, typed payloads, per-node executors, workflow run logs, node run logs, errors, and previewable outputs.
 - Use OpenRouter for Chatbot, Summarizer, Classifier, and Extraction AI style blocks through an injectable provider interface.
 - Publish chat workflows as local chatbot endpoints and test them through `/chat/:slug`.
-- Manage workflows from a premium AI Studio home shell with tabs for Workflows, Create, Templates, Usage, Publish, Knowledge, Blocks, Health, Bundles, and Account.
-- Track local users, signup/login activity, workflow ownership, run ownership, usage stats, published endpoints, and workflow permission metadata.
+- Manage workflows from a premium AI Studio home shell with tabs for Workflows, Create, Templates, Usage, Runs, Publish, Files, Knowledge, Components, Blocks, Health, Bundles, and Account.
+- Track local users, signup/login activity, workflow ownership, run ownership, usage stats, audit logs, published endpoints, and workflow permissions.
+- Stream workflow execution updates through the async run queue and Server-Sent Events.
+- Upload documents into a global File Library before building/running workflows, then reuse those files in Builder and App Run file inputs.
+- Add workflow comments, inspect change history, and save reusable subflow/components from workflow Activity panels.
 - Export/import workflow bundles for review, sharing, or backup.
 
 ## Stack
@@ -116,12 +119,12 @@ VITE_API_BASE_URL=http://localhost:8000
 
 ## Main Pages
 
-- `/`: AI Studio shell with workflow library, creation wizard, templates, usage dashboard, publish manager, knowledge manager, block marketplace, health checks, bundle import/export, and account/login.
-- `/builder/:workflowId`: visual React Flow builder for editing and running workflows.
-- `/app/:workflowId`: shareable local app UI for file/text/chat workflows and dashboard outputs.
+- `/`: AI Studio shell with workflow library, creation wizard, templates, usage dashboard, run history, publish manager, file library, knowledge manager, reusable components, block marketplace, health checks, bundle import/export, and account/login.
+- `/builder/:workflowId`: visual React Flow builder for editing and running workflows with tabbed inspector, version notes, no-change save guard, runtime file selection, block testing, fixes, publish controls, and RAG tools.
+- `/app/:workflowId`: shareable local app UI for file/text/chat workflows, File Library selection, pre-run checklist, live execution timeline, and dashboard outputs.
 - `/runs/:workflowId/:runId`: clean run details page with logs, node outputs, errors, timings, and final results.
 - `/chat/:slug`: published chatbot session UI.
-- `/files`: file library with uploaded document metadata, preview, delete, and reprocess actions.
+- `/files`: file library with proactive document upload, uploaded document metadata, preview, delete, and reprocess actions.
 
 ## MVP Blocks
 
@@ -143,12 +146,14 @@ Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/aman
 - Workflow templates and advanced seeded sample workflows.
 - Workflow versions, restore, and compare.
 - Workflow permissions metadata.
-- Workflow execution with DAG ordering, typed payloads, logs, latency, errors, and preview payloads.
-- File runtime upload, file library, extraction preview, reprocess, delete.
-- RAG collection list, document list, chunk list, retrieval test, delete collection.
+- Workflow comments, change history, and reusable subflows/components.
+- Workflow execution with DAG ordering, typed payloads, async queue, Server-Sent Events, logs, latency, errors, and preview payloads.
+- File runtime upload, global file library upload, extraction preview, reprocess, delete.
+- RAG collection list, diagnostics, document list, chunk list, retrieval test, evaluation, delete collection, and collection re-ingest/self-heal.
 - Global knowledge collection inventory.
 - Published chatbot manager and session-aware chat endpoint.
 - Admin usage dashboard.
+- Admin audit logs and observability dashboard.
 - Credential/config health endpoint.
 - Block marketplace metadata endpoint.
 - Workflow bundle export/import.
@@ -163,6 +168,8 @@ GET    /blocks/marketplace
 POST   /auth/signup
 POST   /auth/login
 GET    /admin/usage
+GET    /admin/audit-logs
+GET    /admin/observability
 
 GET    /workflows
 POST   /workflows
@@ -178,11 +185,25 @@ POST   /workflows/{workflow_id}/versions
 POST   /workflows/{workflow_id}/versions/{version_id}/restore
 GET    /workflows/{workflow_id}/versions/{version_id}/compare
 
+GET    /workflows/{workflow_id}/permissions
+POST   /workflows/{workflow_id}/permissions
+DELETE /workflows/{workflow_id}/permissions/{permission_id}
+
+GET    /workflows/{workflow_id}/comments
+POST   /workflows/{workflow_id}/comments
+GET    /workflows/{workflow_id}/history
+GET    /subflows
+POST   /workflows/{workflow_id}/subflows
+
 POST   /workflows/{workflow_id}/execute
+POST   /workflows/{workflow_id}/execute-async
 GET    /workflows/{workflow_id}/runs
 GET    /workflows/{workflow_id}/runs/{run_id}
+GET    /workflows/{workflow_id}/runs/{run_id}/events
+POST   /workflows/{workflow_id}/nodes/{node_id}/test
 
 POST   /files/runtime-upload
+POST   /files/library-upload
 GET    /files
 GET    /files/{file_id}
 DELETE /files/{file_id}
@@ -193,7 +214,10 @@ GET    /workflows/{workflow_id}/knowledge/collections
 GET    /workflows/{workflow_id}/knowledge/collections/{collection}/documents
 GET    /workflows/{workflow_id}/knowledge/documents/{document_id}/chunks
 POST   /workflows/{workflow_id}/knowledge/collections/{collection}/retrieve
+POST   /workflows/{workflow_id}/knowledge/collections/{collection}/evaluate
+GET    /workflows/{workflow_id}/knowledge/evaluations
 DELETE /workflows/{workflow_id}/knowledge/collections/{collection}
+POST   /workflows/{workflow_id}/knowledge/collections/{collection}/reingest
 
 POST   /workflows/{workflow_id}/publish
 POST   /workflows/{workflow_id}/unpublish
@@ -251,13 +275,29 @@ Alembic upgraded to head
 
 These directories are intentionally ignored by Git except `.gitkeep` placeholders. The app is designed to run offline/local except for LLM calls to OpenRouter and optional model downloads if enabled.
 
-## Current Gaps And Recommended Next Improvements
+## Current Product Surfaces
 
-- Add true streaming execution updates with WebSocket or Server-Sent Events. The current workflow app shows an execution timeline after synchronous execution.
-- Enforce workflow permissions at the API level. Permission metadata and UI exist, but strict access control is still an MVP follow-up.
-- Move long-running execution to a background job queue before adding large documents or multi-agent loops.
-- Add a first-class visual prompt/schema editor for Extraction AI beyond the current config form.
-- Add collection-level re-ingest from the Knowledge tab. Current reprocess exists at file level and RAG ingestion happens through workflows.
+- `Workflows`: searchable workflow library with rename, quality score, latest output, run health, RAG health, versions, permissions, activity, duplicate, archive, restore, delete, app links, publish, and export actions.
+- `Create`: blank builder launch plus guided auto-build recipes and advanced template cloning.
+- `Templates`: polished gallery for seeded advanced workflow templates.
+- `Usage`: admin usage dashboard with users, auth events, workflow runs, failures, files, RAG chunks, latency, audit events, and observability metrics.
+- `Runs`: cross-workflow execution history with statuses, timings, errors, owner/session metadata, and links to clean run detail pages.
+- `Publish`: published chatbot manager with chat links, API snippets, iframe embeds, copy actions, unpublish, and app preview.
+- `Files`: global File Library upload and inventory for documents reusable in Builder and App Run file inputs.
+- `Knowledge`: global RAG collection inventory with chunk/document counts, ingest freshness, retrieval testing, and workflow links.
+- `Components`: saved reusable subflows/components with graph JSON copy and source workflow links.
+- `Blocks`: schema-driven block marketplace with ports and config metadata.
+- `Health`: backend, storage, OpenRouter, Chroma, embeddings, SQLite, and environment readiness checks.
+- `Bundles`: workflow bundle export/import for review and backup.
+- `Account`: local-first signup/login/logout so ownership and permissions are tracked.
+
+## Recommended Next Improvements
+
+- Add multiplayer editing presence and conflict resolution for collaborative builder sessions.
+- Add a visual insertion flow for saved Components so subflows can be dropped back onto the canvas as grouped blocks.
+- Add provider adapters for email, Slack/Teams, database writes, and browser automation where current blocks intentionally prepare local payloads first.
+- Add production auth/token handling if this moves beyond local-first use.
+- Add E2E browser tests around upload -> extract -> RAG -> chatbot -> output and publish chat flows.
 - Add automated frontend E2E tests for builder interactions and workflow app uploads.
 - Add Postgres migration notes and a production deployment profile when moving beyond local-first.
 
