@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, FileText, FolderOpen, RefreshCw, Trash2, UploadCloud } from "lucide-react";
 import { deleteFile, getFile, listFiles, reprocessFile, uploadLibraryFile, type FileLibraryDetail, type FileLibraryItem } from "../lib/api";
 
 type FileLibraryPageProps = {
@@ -65,21 +66,29 @@ export function FileLibraryPage({ onBack, onOpenWorkflow }: FileLibraryPageProps
     <main className="min-h-screen bg-[radial-gradient(circle_at_12%_8%,_rgba(182,255,135,0.36),_transparent_24%),radial-gradient(circle_at_90%_18%,_rgba(126,211,255,0.24),_transparent_23%),linear-gradient(135deg,_#f7fbf4,_#fff8ed)] p-4 text-ink lg:p-6">
       <div className="mx-auto grid max-w-7xl gap-5 lg:grid-cols-[290px_minmax(0,1fr)]">
         <aside className="rounded-[2rem] border border-white/70 bg-ink p-5 text-white shadow-panel">
-          <button type="button" onClick={onBack} className="rounded-full bg-white/12 px-4 py-2 text-sm font-semibold">
+          <button type="button" onClick={onBack} className="inline-flex items-center gap-2 rounded-full bg-white/12 px-4 py-2 text-sm font-semibold">
+            <ArrowLeft className="h-4 w-4" aria-hidden />
             Back
           </button>
           <p className="mt-8 text-xs font-semibold uppercase tracking-[0.32em] text-white/42">AI Studio</p>
-          <h1 className="mt-2 text-4xl font-bold">File Library</h1>
+          <h1 className="mt-2 flex items-center gap-3 text-4xl font-bold">
+            <FolderOpen className="h-9 w-9 text-lime" aria-hidden />
+            File Library
+          </h1>
           <p className="mt-3 text-sm leading-6 text-white/62">{status}</p>
           <div className="mt-6 grid gap-2">
             <Info label="Files" value={String(files.length)} dark />
             <Info label="Selected" value={selected ? selected.original_name : "none"} dark />
           </div>
-          <button type="button" onClick={() => void refreshFiles()} className="mt-5 w-full rounded-2xl bg-lime px-4 py-3 text-sm font-bold text-ink">
+          <button type="button" onClick={() => void refreshFiles()} className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-lime px-4 py-3 text-sm font-bold text-ink">
+            <RefreshCw className="h-4 w-4" aria-hidden />
             Refresh Library
           </button>
           <label className="mt-3 block rounded-2xl border border-dashed border-white/20 bg-white/8 p-4 text-sm font-semibold text-white">
-            Upload Documents
+            <span className="inline-flex items-center gap-2">
+              <UploadCloud className="h-4 w-4" aria-hidden />
+              Upload Documents
+            </span>
             <span className="mt-1 block text-xs font-normal leading-5 text-white/48">
               Add PDFs, DOCX, TXT, CSV, or JSON before building/running a workflow.
             </span>
@@ -100,7 +109,10 @@ export function FileLibraryPage({ onBack, onOpenWorkflow }: FileLibraryPageProps
         <section className="grid gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
           <div className="rounded-[2rem] border border-white/70 bg-white/82 p-4 shadow-panel backdrop-blur">
             <div className="mb-3 flex items-center justify-between">
-              <p className="text-sm font-semibold">Uploaded Documents</p>
+              <p className="inline-flex items-center gap-2 text-sm font-semibold">
+                <FileText className="h-4 w-4" aria-hidden />
+                Uploaded Documents
+              </p>
               <span className="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink/55">{files.length}</span>
             </div>
             <div className="max-h-[calc(100vh-9rem)] space-y-3 overflow-auto pr-1">
@@ -138,17 +150,20 @@ export function FileLibraryPage({ onBack, onOpenWorkflow }: FileLibraryPageProps
                     <button
                       type="button"
                       onClick={() => selected.workflow_id && onOpenWorkflow(selected.workflow_id)}
-                      className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+                      className="inline-flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
                     >
+                      <FolderOpen className="h-4 w-4" aria-hidden />
                       Open Workflow
                     </button>
                   ) : null}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <button type="button" onClick={() => void reprocessSelectedFile()} className="rounded-full bg-lime px-4 py-2 text-sm font-semibold text-ink">
+                  <button type="button" onClick={() => void reprocessSelectedFile()} className="inline-flex items-center gap-2 rounded-full bg-lime px-4 py-2 text-sm font-semibold text-ink">
+                    <RefreshCw className="h-4 w-4" aria-hidden />
                     Reprocess
                   </button>
-                  <button type="button" onClick={() => void deleteSelectedFile()} className="rounded-full bg-coral/20 px-4 py-2 text-sm font-semibold text-ink">
+                  <button type="button" onClick={() => void deleteSelectedFile()} className="inline-flex items-center gap-2 rounded-full bg-coral/20 px-4 py-2 text-sm font-semibold text-ink">
+                    <Trash2 className="h-4 w-4" aria-hidden />
                     Delete File
                   </button>
                 </div>

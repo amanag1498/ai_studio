@@ -87,6 +87,26 @@ export const blockDefinitions: BlockDefinition[] = [
     ],
     fields: fields([
       {
+        key: "sourceMode",
+        label: "Source Mode",
+        kind: "select",
+        description: "Runtime upload asks for files during a run. File Library reuses stored local documents without asking again.",
+        defaultValue: "runtime_or_library",
+        options: [
+          { label: "Runtime Upload or Library", value: "runtime_or_library" },
+          { label: "File Library Only", value: "library" },
+          { label: "Default Local Path Only", value: "default_path" },
+        ],
+      },
+      {
+        key: "libraryFileIds",
+        label: "Default File Library IDs",
+        kind: "text",
+        description: "Optional comma-separated uploaded file IDs to reuse every run.",
+        placeholder: "12, 18",
+        defaultValue: "",
+      },
+      {
         key: "accept",
         label: "Accepted Types",
         kind: "text",
@@ -150,6 +170,13 @@ export const blockDefinitions: BlockDefinition[] = [
           { label: "Plain Text", value: "plain" },
         ],
       },
+      {
+        key: "qualityReport",
+        label: "Quality Report",
+        kind: "toggle",
+        description: "Emit parser, counts, warnings, table hints, failed files, and preview snippets.",
+        defaultValue: true,
+      },
     ]),
   },
   {
@@ -182,6 +209,7 @@ export const blockDefinitions: BlockDefinition[] = [
           { label: "Ingest and Retrieve", value: "ingest_and_retrieve" },
           { label: "Ingest Only", value: "ingest_only" },
           { label: "Retrieve Only", value: "retrieve_only" },
+          { label: "Refresh Collection", value: "refresh_collection" },
         ],
       },
       {
@@ -221,6 +249,25 @@ export const blockDefinitions: BlockDefinition[] = [
         max: 20,
         step: 1,
         defaultValue: 4,
+      },
+      {
+        key: "retrievalStrategy",
+        label: "Retrieval Strategy",
+        kind: "select",
+        description: "Vector search is semantic. Hybrid blends vector search with keyword matching from local chunks.",
+        defaultValue: "hybrid",
+        options: [
+          { label: "Hybrid Vector + Keyword", value: "hybrid" },
+          { label: "Vector Only", value: "vector" },
+          { label: "Keyword Only", value: "keyword" },
+        ],
+      },
+      {
+        key: "rerank",
+        label: "Built-in Rerank",
+        kind: "toggle",
+        description: "Reorder retrieved chunks by score and snippet quality before passing to Chatbot.",
+        defaultValue: true,
       },
       {
         key: "tags",
@@ -286,6 +333,28 @@ export const blockDefinitions: BlockDefinition[] = [
           { label: "Concise", value: "concise" },
           { label: "Detailed", value: "detailed" },
         ],
+      },
+      {
+        key: "outputMode",
+        label: "Output Mode",
+        kind: "select",
+        description: "Controls the final answer shape returned by the Chatbot.",
+        defaultValue: "chat",
+        options: [
+          { label: "Chat Answer", value: "chat" },
+          { label: "Markdown Report", value: "markdown_report" },
+          { label: "Decision Memo", value: "decision_memo" },
+          { label: "Table", value: "table" },
+          { label: "JSON Schema", value: "json_schema" },
+        ],
+      },
+      {
+        key: "responseSchema",
+        label: "Response JSON Schema",
+        kind: "textarea",
+        description: "Used when Output Mode is JSON Schema.",
+        placeholder: "{\"answer\":\"string\",\"citations\":[\"string\"],\"confidence\":\"number\"}",
+        defaultValue: "",
       },
       {
         key: "temperature",
@@ -362,7 +431,19 @@ export const blockDefinitions: BlockDefinition[] = [
           { label: "Append", value: "append" },
           { label: "JSON Merge", value: "json_merge" },
           { label: "Template", value: "template" },
+          { label: "Select Fields", value: "select_fields" },
+          { label: "Flatten Arrays", value: "flatten_arrays" },
+          { label: "Deduplicate Chunks", value: "dedupe_chunks" },
+          { label: "Preserve Metadata", value: "preserve_metadata" },
         ],
+      },
+      {
+        key: "fieldPaths",
+        label: "Field Paths",
+        kind: "text",
+        description: "Comma-separated JSON paths used by Select Fields mode.",
+        placeholder: "summary, extracted.risks, metadata.source",
+        defaultValue: "",
       },
     ]),
   },
@@ -385,6 +466,14 @@ export const blockDefinitions: BlockDefinition[] = [
       { id: "evaluation", label: "Evaluation", direction: "output", dataTypes: ["json", "boolean"] },
     ],
     fields: fields([
+      {
+        key: "rules",
+        label: "Visual Rules JSON",
+        kind: "textarea",
+        description: "Rules from the visual builder. Supports AND/OR groups with exists, equals, contains, and boolean operators.",
+        placeholder: "{\"logic\":\"and\",\"rules\":[{\"field\":\"\",\"operator\":\"contains\",\"value\":\"approved\"}]}",
+        defaultValue: "",
+      },
       {
         key: "expression",
         label: "Expression",
@@ -472,6 +561,22 @@ export const blockDefinitions: BlockDefinition[] = [
           { label: "Markdown", value: "markdown" },
           { label: "Table", value: "table" },
           { label: "JSON", value: "json" },
+          { label: "Summary Card", value: "summary_card" },
+          { label: "Metric Cards", value: "metric_cards" },
+          { label: "Citations", value: "citations" },
+          { label: "File Preview", value: "file_preview" },
+          { label: "Error Panel", value: "error_panel" },
+        ],
+      },
+      {
+        key: "cardLayout",
+        label: "Card Layout",
+        kind: "select",
+        defaultValue: "balanced",
+        options: [
+          { label: "Balanced", value: "balanced" },
+          { label: "Compact", value: "compact" },
+          { label: "Detailed", value: "detailed" },
         ],
       },
     ]),
@@ -493,6 +598,18 @@ export const blockDefinitions: BlockDefinition[] = [
       { id: "log", label: "Log", direction: "output", dataTypes: ["log"] },
     ],
     fields: fields([
+      {
+        key: "traceMode",
+        label: "Trace Mode",
+        kind: "select",
+        description: "Controls how human-friendly the log output should be.",
+        defaultValue: "friendly",
+        options: [
+          { label: "Friendly Debug Trace", value: "friendly" },
+          { label: "Raw Payload", value: "raw" },
+          { label: "Failure Analysis", value: "failure_analysis" },
+        ],
+      },
       {
         key: "level",
         label: "Log Level",
@@ -584,6 +701,7 @@ export const blockDefinitions: BlockDefinition[] = [
     outputs: [{ id: "json", label: "JSON", direction: "output", dataTypes: ["json"] }],
     fields: fields([
       { key: "model", label: "Model", kind: "text", defaultValue: "openai/gpt-4o-mini" },
+      { key: "schemaFields", label: "Visual Schema Fields", kind: "textarea", defaultValue: "", placeholder: "[{\"name\":\"summary\",\"type\":\"string\",\"required\":true}]", description: "JSON array of fields with name, type, required, description, and example." },
       { key: "schemaPrompt", label: "Schema / Fields To Extract", kind: "textarea", defaultValue: "Return JSON with keys: title, summary, important_dates, action_items, risks", description: "Describe the JSON object you want back." },
       { key: "strictMode", label: "Strict Mode", kind: "toggle", defaultValue: true },
     ]),

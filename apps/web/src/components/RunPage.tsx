@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, Clock3, FileJson, GitBranch, ListChecks } from "lucide-react";
 import { getWorkflowRun, type WorkflowRunRecord } from "../lib/api";
 import { explainError } from "../lib/friendlyErrors";
 
@@ -27,17 +28,24 @@ export function RunPage({ workflowId, runId, onBack }: RunPageProps) {
     <main className="min-h-screen bg-[linear-gradient(135deg,_#f5fbf7,_#fff7ed)] px-4 py-6 text-ink">
       <div className="mx-auto max-w-7xl">
         <header className="rounded-[2rem] bg-white/85 p-6 shadow-panel">
-          <button type="button" onClick={onBack} className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold">
+          <button type="button" onClick={onBack} className="inline-flex items-center gap-2 rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold">
+            <ArrowLeft className="h-4 w-4" aria-hidden />
             Back
           </button>
-          <h1 className="mt-4 text-4xl font-bold">Workflow Run Details</h1>
+          <h1 className="mt-4 flex items-center gap-3 text-4xl font-bold">
+            <ListChecks className="h-9 w-9 text-lime" aria-hidden />
+            Workflow Run Details
+          </h1>
           <p className="mt-2 text-sm text-ink/62">{status}</p>
         </header>
 
         {run ? (
           <section className="mt-5 grid gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
             <aside className="rounded-[2rem] bg-white/85 p-5 shadow-panel">
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Run #{run.id}</p>
+              <p className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">
+                <Clock3 className="h-4 w-4" aria-hidden />
+                Run #{run.id}
+              </p>
               <h2 className="mt-2 text-2xl font-semibold">{run.status}</h2>
               <div className="mt-4 grid gap-2 text-sm">
                 <Info label="Workflow" value={`#${run.workflow_id}`} />
@@ -52,7 +60,10 @@ export function RunPage({ workflowId, runId, onBack }: RunPageProps) {
 
             <div className="space-y-5">
               <section className="rounded-[2rem] bg-white/85 p-5 shadow-panel">
-                <h2 className="text-xl font-semibold">Node Timeline</h2>
+                <h2 className="flex items-center gap-2 text-xl font-semibold">
+                  <GitBranch className="h-5 w-5" aria-hidden />
+                  Node Timeline
+                </h2>
                 <p className="mt-3 rounded-2xl bg-lime/20 px-4 py-3 text-sm leading-6 text-ink">
                   {explainWorkflowRun(run)}
                 </p>
@@ -79,7 +90,10 @@ export function RunPage({ workflowId, runId, onBack }: RunPageProps) {
               </section>
 
               <section className="rounded-[2rem] bg-white/85 p-5 shadow-panel">
-                <h2 className="text-xl font-semibold">Final Outputs</h2>
+                <h2 className="flex items-center gap-2 text-xl font-semibold">
+                  <FileJson className="h-5 w-5" aria-hidden />
+                  Final Outputs
+                </h2>
                 {outputCards.length ? (
                   <div className="mt-4 grid gap-4 xl:grid-cols-2">
                     {outputCards.map((card) => (

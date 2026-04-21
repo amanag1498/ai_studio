@@ -38,7 +38,7 @@ class TxtDocumentParser(DocumentParser):
     def parse(self, uploaded_file: UploadedFile) -> ParsedDocument:
         path = Path(uploaded_file.storage_path)
         text = path.read_text(encoding="utf-8", errors="ignore")
-        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "line_count": len(text.splitlines())})
+        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "line_count": len(text.splitlines()), "word_count": len(text.split())})
 
 
 class CsvDocumentParser(DocumentParser):
@@ -53,7 +53,7 @@ class CsvDocumentParser(DocumentParser):
             for row in reader:
                 rows.append(row)
         text = "\n".join(", ".join(cell for cell in row) for row in rows)
-        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "row_count": len(rows)})
+        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "row_count": len(rows), "detected_tables": 1 if rows else 0, "word_count": len(text.split())})
 
 
 class JsonDocumentParser(DocumentParser):
@@ -64,7 +64,7 @@ class JsonDocumentParser(DocumentParser):
         path = Path(uploaded_file.storage_path)
         payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
         text = json.dumps(payload, indent=2, ensure_ascii=True)
-        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "root_type": type(payload).__name__})
+        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "root_type": type(payload).__name__, "word_count": len(text.split())})
 
 
 class DocxDocumentParser(DocumentParser):
@@ -75,7 +75,7 @@ class DocxDocumentParser(DocumentParser):
         document = DocxDocument(uploaded_file.storage_path)
         paragraphs = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
         text = "\n".join(paragraphs)
-        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "paragraph_count": len(paragraphs)})
+        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "paragraph_count": len(paragraphs), "table_count": len(document.tables), "word_count": len(text.split())})
 
 
 class PdfDocumentParser(DocumentParser):
@@ -86,7 +86,8 @@ class PdfDocumentParser(DocumentParser):
         reader = PdfReader(uploaded_file.storage_path)
         pages = [(page.extract_text() or "").strip() for page in reader.pages]
         text = "\n\n".join(page for page in pages if page)
-        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "page_count": len(reader.pages)})
+        failed_pages = sum(1 for page in pages if not page)
+        return ParsedDocument(text=text, metadata={"parser": self.parser_name, "page_count": len(reader.pages), "failed_pages": failed_pages, "word_count": len(text.split())})
 
 
 class OcrDocumentParser(DocumentParser):

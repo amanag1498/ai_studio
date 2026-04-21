@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, Bot, MessageCircle, Send, UserRound } from "lucide-react";
 import {
   getPublishedChatbot,
   sendPublishedChatMessage,
@@ -81,14 +82,18 @@ export function PublishedChatPage({ slug, onBack }: PublishedChatPageProps) {
           <button
             type="button"
             onClick={onBack}
-            className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
+            className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
           >
+            <ArrowLeft className="h-4 w-4" aria-hidden />
             Back to Workflows
           </button>
           <p className="mt-6 text-xs font-semibold uppercase tracking-[0.35em] text-white/55">
             Published Chatbot
           </p>
-          <h1 className="mt-2 text-4xl font-bold">{slug}</h1>
+          <h1 className="mt-2 flex items-center gap-3 text-4xl font-bold">
+            <Bot className="h-9 w-9 text-lime" aria-hidden />
+            {slug}
+          </h1>
           <p className="mt-3 text-sm leading-6 text-white/68">{statusMessage}</p>
 
           {chatbot ? (
@@ -100,7 +105,10 @@ export function PublishedChatPage({ slug, onBack }: PublishedChatPageProps) {
           ) : null}
 
           <label className="mt-5 block">
-            <span className="text-sm font-semibold">Session ID</span>
+            <span className="inline-flex items-center gap-2 text-sm font-semibold">
+              <MessageCircle className="h-4 w-4" aria-hidden />
+              Session ID
+            </span>
             <input
               type="text"
               value={sessionId}
@@ -109,7 +117,10 @@ export function PublishedChatPage({ slug, onBack }: PublishedChatPageProps) {
             />
           </label>
           <label className="mt-4 block">
-            <span className="text-sm font-semibold">User ID</span>
+            <span className="inline-flex items-center gap-2 text-sm font-semibold">
+              <UserRound className="h-4 w-4" aria-hidden />
+              User ID
+            </span>
             <input
               type="text"
               value={userId}
@@ -174,8 +185,9 @@ export function PublishedChatPage({ slug, onBack }: PublishedChatPageProps) {
               type="button"
               onClick={sendMessage}
               disabled={isSending}
-              className="rounded-full bg-lime px-5 py-3 text-sm font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-full bg-lime px-5 py-3 text-sm font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-60"
             >
+              <Send className="h-4 w-4" aria-hidden />
               {isSending ? "Sending..." : "Send"}
             </button>
           </div>

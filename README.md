@@ -128,17 +128,97 @@ VITE_API_BASE_URL=http://localhost:8000
 
 ## MVP Blocks
 
-- Inputs: Chat Input, Text Input, File Upload.
-- Knowledge: Text Extraction, RAG Knowledge.
-- AI: Chatbot, Summarizer, Classifier, Extraction AI, Prompt Template, Retry/Fallback LLM.
-- Knowledge: Document Splitter, Table Extractor.
-- Logic: Merge, Condition, Schema Validator, Data Mapper, Loop/For Each, Approval Step, Router/Switch.
-- Memory: Conversation Memory, Long-Term Memory.
-- Outputs: Chat Output, JSON Output, Dashboard/Preview, Logger, Citation Formatter, Email Sender, Slack/Teams Notification, CSV/Excel Export.
-- System: HTTP Request, Webhook Trigger, Database Writer, PII Redactor, Guardrail.
-- System/future scaffolds: OCR, Web Search, Web Page Reader, Publish API, Error Handler, Re-ranker, Research Agent, SQL Assistant, Database Query, Email, Notification, Human Approval, Guardrail, Access Control, Long-Term Memory.
+Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/amanagarwal/Desktop/hackathon_project/packages/shared/src/blocks.ts), backend validation is mirrored in [apps/api/app/core/block_registry.py](/Users/amanagarwal/Desktop/hackathon_project/apps/api/app/core/block_registry.py), and implemented runtime behavior lives in [apps/api/app/services/execution.py](/Users/amanagarwal/Desktop/hackathon_project/apps/api/app/services/execution.py).
 
-Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/amanagarwal/Desktop/hackathon_project/packages/shared/src/blocks.ts) and backend validation is mirrored in [apps/api/app/core/block_registry.py](/Users/amanagarwal/Desktop/hackathon_project/apps/api/app/core/block_registry.py).
+### Inputs
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| Chat Input | Accepts a runtime user message for chatbot, RAG, router, or memory flows. | Placeholder text and optional history persistence. Runtime message is supplied from Builder/App/Published Chat. | `message` as chat/text. |
+| Text Input | Provides static text, policy content, prompts, URLs, examples, or inline documents. | `defaultText` or runtime override. | `text`. |
+| File Upload | Stages files for parsing and downstream document workflows. Supports runtime upload, default local paths, and first-class File Library reuse through saved library file IDs. Validates extension and size. | Accepted extensions, max size, source mode, optional File Library IDs/default paths. | `file` metadata list and `metadata` JSON with source mode, accepted types, file count, and library IDs. |
+| Form Input | Captures structured runtime form data for app-like workflows. | Field list and optional default values JSON. | `json` and text representation. |
+| Webhook Trigger | Simulates or accepts an incoming webhook-style payload. | Sample payload JSON. | `payload` JSON. |
+
+### Knowledge And RAG
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| Text Extraction | Parses PDF, DOCX, TXT, CSV, and JSON into normalized document text. No OCR yet. Emits extraction quality metadata: parser, page/line/word counts, failed files, warnings, detected table hints, and preview snippets. | File Upload output and extraction strategy. | `document`, `text`, and `metadata`. |
+| RAG Knowledge | Ingests documents, chunks text, embeds locally with sentence-transformers, stores in ChromaDB, and retrieves source chunks. Modes: Ingest Only, Retrieve Only, Ingest + Retrieve, Refresh Collection. Retrieval strategies: hybrid vector+keyword, vector only, keyword only. Built-in rerank can reorder source chunks. | Collection name, mode, chunk size, overlap, top-k, retrieval strategy, rerank toggle, tags, allowed file types. | `knowledge`, `matches`, and `diagnostics`. |
+| Document Splitter | Splits long text/documents into reviewable sections for loops, extraction, or exports. | Document/text input, split mode, max characters. | `sections`. |
+| Table Extractor | Extracts simple row/table-like content into JSON rows. | Document/text input and delimiter mode. | `tables` JSON. |
+| Query Rewriter | Improves vague user queries before RAG or web search. | Query input and optional domain hint. | Rewritten `query`. |
+| Re-ranker | Reorders retrieved chunks by score/content quality before answer generation. | Knowledge/matches input and top-k. | Re-ranked `knowledge`. |
+| Citation Verifier | Scores whether answer terms are supported by retrieved sources. | Answer plus knowledge/source JSON. | `verification` JSON with support score and unsupported terms. |
+| Citation Formatter | Converts citations/source chunks into readable text or JSON source lists. | Knowledge/chat/json sources. | `text` and `json`. |
+| Web Search | Local-first placeholder search adapter that prepares search-style knowledge results. It is designed for a live search provider later. | Query and provider label/top-k. | `results` knowledge/json. |
+| Web Page Reader | Local-first placeholder reader that normalizes a URL into a document payload. Live fetching is adapter-gated. | URL text and reader mode. | `document`. |
+
+### AI Blocks
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| Chatbot | Calls the injectable LLM provider, OpenRouter by default. Uses system prompt, user message, RAG context, optional memory, citations, and output mode. Output modes include chat answer, markdown report, decision memo, table, and JSON schema. | Model, system prompt, answer style, output mode, optional response schema, temperature, message, optional context. | `reply`, structured `json`, and `citations`. |
+| Summarizer | Summarizes text, documents, or knowledge into a controlled style and length. | Model, style, max words, content input. | `summary`. |
+| Classifier | Classifies text/document/chat content into configured labels with optional multi-label behavior. | Model, labels, multi-label toggle, content input. | `classification`. |
+| Extraction AI | Extracts structured JSON from text/documents. Supports schema prompt plus visual schema fields with name/type/required/description/example metadata. | Model, schema prompt or visual fields, strict mode, content input. | `json`. |
+| Prompt Template | Renders reusable prompts from upstream variables using `{{input}}` style placeholders. | Template and upstream variables. | `prompt`. |
+| Retry/Fallback LLM | Runs an LLM call with retry/fallback model metadata. | Primary model, fallback model, system prompt, retry count, prompt input. | `reply`, telemetry `json`, and citations metadata. |
+| Browser Agent | Local-safe browser automation planner. It creates a plan only; real browser execution is adapter-gated. | Task and safety mode. | `result` JSON/text. |
+
+### Logic And Control
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| Merge | Combines two upstream payloads. Modes include append, JSON merge, template, select fields, flatten arrays, deduplicate chunks, and preserve metadata. | Left/right inputs, mode, optional field paths. | `merged` plus merge details `json`. |
+| Condition | Branches based on simple rules. Supports legacy expressions and visual rules JSON with AND/OR groups using exists, equals, contains, and boolean operators. | Value input, expression or visual rules JSON. | `true`, `false`, and `evaluation`. |
+| Schema Validator | Validates JSON/text for required keys. | Payload and required keys. | `validation`. |
+| Data Mapper | Maps/renames JSON fields using source:target mappings. | Input payload and mappings. | `mapped`. |
+| Loop / For Each | Normalizes lists/sections/items so later blocks can process iterable-style payloads. | Items input and limit. | `items`. |
+| Approval Step | Simulates a human approval gate for MVP workflows. | Request input and default decision. | `approved` or `rejected`. |
+| Router / Switch | Selects a route by matching route names/keywords in input text. | Input payload, routes, default route. | `route`. |
+
+### Memory
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| Conversation Memory | Stores recent chat messages in SQLite by workflow/session/user and emits recent history for Chatbot context. | Message input, namespace, window size. | `memory` and `history`. |
+| Long-Term Memory | Persists durable facts/chunks across runs for a workflow-scoped memory store. | Content input, scope, max facts. | `memory`. |
+
+### Outputs And Observability
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| Chat Output | Produces final chat answer cards with citations/source chunks when available. | Message input and streaming toggle. | Rendered chat `result`. |
+| JSON Output | Produces structured JSON output for API/app/dashboard use. | Payload input and pretty-print toggle. | Rendered JSON `result`. |
+| Dashboard/Preview | Builds user-friendly preview payloads. Modes include auto, markdown, table, JSON, summary card, metric cards, citations, file preview, and error panel. Emits configurable cards with summary, metrics, citations, files, errors, and JSON. | Content input, preview mode, card layout. | Preview `result`. |
+| Logger | Captures local debug traces. Friendly mode explains what happened, why it ran, data in/out, and what failed; raw/failure-analysis modes are also available. | Payload input, trace mode, log level. | `log`. |
+| CSV/Excel Export | Writes structured rows to a local CSV file under storage uploads/exports. | Data input and filename. | File/json metadata. |
+| Email Sender | Prepares an email provider payload. It does not send live email until a provider adapter is connected. | Content, recipient, subject. | Status JSON/text. |
+| Slack/Teams Notification | Prepares a team notification payload. It does not send live messages until a provider adapter is connected. | Content and channel. | Status JSON/text. |
+
+### System And Safety
+
+| Block | What it does | Needs | Outputs |
+| --- | --- | --- | --- |
+| HTTP Request | Prepares a safe external API request payload. Live request execution is disabled unless enabled/configured. | Body input, method, URL, enable flag. | Response JSON. |
+| Database Writer | Captures a row as local run evidence and returns a record-style payload. | Row input and table label. | `record`. |
+| PII Redactor | Masks emails and phone numbers before AI/RAG/output steps. | Text/json/chat content and redaction toggles. | `redacted` text and stats JSON. |
+| Guardrail | Routes content to safe/blocked based on configured blocked terms. | Content input and blocked terms. | `safe` or `blocked`. |
+
+### Phase 2/3 Scaffolds
+
+The block registry also includes placeholders/interfaces for OCR, Summarizer variants, Classifier variants, Intent Router, Web Search, Web Page Reader, Publish API, Error Handler, Re-ranker, Research Agent, SQL Assistant, Database Query, Email, Notification, Human Approval, Guardrail, Access Control, and Long-Term Memory expansion. Some of these already have local-safe MVP behavior; others are intentionally stubs with integration notes so future provider adapters can plug into the same graph engine.
+
+## What Each Workflow Needs To Run Well
+
+- File workflows need either a runtime upload, a selected File Library item, saved File Library IDs on the File Upload block, or valid default local paths.
+- RAG workflows need documents ingested into the configured collection before Retrieve Only mode can answer well.
+- Chatbot, Summarizer, Classifier, Extraction AI, and Retry/Fallback LLM need `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, and `OPENROUTER_MODEL` configured.
+- Local embeddings need `EMBEDDING_MODEL`; if `EMBEDDING_ALLOW_DOWNLOAD=false`, the model must already exist locally.
+- Dashboard/Preview and Logger are best connected near the end of workflows and also to intermediate nodes when debugging.
+- Email, Slack/Teams, HTTP, Browser Agent, and Web Search/Page Reader are local-safe payload/preparation blocks until real provider adapters are connected.
 
 ## Backend Capabilities
 

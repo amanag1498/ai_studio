@@ -16,6 +16,24 @@ import ReactFlow, {
   type ReactFlowInstance,
 } from "reactflow";
 import {
+  ArchiveRestore,
+  Bot,
+  Boxes,
+  ChevronLeft,
+  ClipboardCheck,
+  FolderOpen,
+  LayoutDashboard,
+  Maximize2,
+  PanelLeftOpen,
+  PanelRightOpen,
+  Play,
+  Rocket,
+  RotateCcw,
+  Save,
+  Search,
+  Sparkles,
+} from "lucide-react";
+import {
   blockDefinitions,
   getBlockDefinition,
   type BlockConfigFieldDefinition,
@@ -1405,7 +1423,31 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     const nextPrompt = current.includes(fieldName)
       ? current
       : `${current.trim()}\n- ${fieldName}: describe the ${fieldName.replace(/_/g, " ")} value`.trim();
+    const rawFields = String(selectedNode.data.config.schemaFields || "");
+    const fields = parseVisualSchemaFields(rawFields);
+    const nextFields = fields.some((field) => field.name === fieldName)
+      ? fields
+      : fields.concat({ name: fieldName, type: fieldName === "confidence" ? "number" : "string", required: true, description: `Extract the ${fieldName.replace(/_/g, " ")} value.` });
     updateSelectedNodeField({ key: "schemaPrompt", label: "Schema", kind: "textarea", defaultValue: nextPrompt }, nextPrompt);
+    updateSelectedNodeField({ key: "schemaFields", label: "Schema Fields", kind: "textarea", defaultValue: "" }, JSON.stringify(nextFields, null, 2));
+  }
+
+  function applyConditionRule(operator: "exists" | "boolean" | "contains" | "equals", value = "") {
+    const expression = operator === "exists" || operator === "boolean" ? operator : `${operator}:${value}`;
+    updateSelectedNodeField({ key: "expression", label: "Expression", kind: "text", defaultValue: expression }, expression);
+    updateSelectedNodeField(
+      { key: "rules", label: "Rules", kind: "textarea", defaultValue: "" },
+      JSON.stringify({ logic: "and", rules: [{ field: "", operator, value }] }, null, 2),
+    );
+  }
+
+  function parseVisualSchemaFields(raw: string): Array<{ name: string; type: string; required: boolean; description?: string; example?: string }> {
+    try {
+      const parsed = JSON.parse(raw || "[]");
+      return Array.isArray(parsed) ? parsed.filter((field) => field && typeof field.name === "string") : [];
+    } catch {
+      return [];
+    }
   }
 
   function addFormInputField(fieldName: string) {
@@ -1699,6 +1741,18 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     setStatusMessage(`${file.original_name} selected from File Library.`);
   }
 
+  function saveLibraryFileAsNodeDefault(file: FileLibraryItem) {
+    if (!selectedNode) return;
+    const currentIds = String(selectedNode.data.config.libraryFileIds || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const nextIds = currentIds.includes(String(file.id)) ? currentIds : currentIds.concat(String(file.id));
+    updateSelectedNodeField({ key: "sourceMode", label: "Source Mode", kind: "select", defaultValue: "library" }, "library");
+    updateSelectedNodeField({ key: "libraryFileIds", label: "Library File IDs", kind: "text", defaultValue: "" }, nextIds.join(","));
+    setStatusMessage(`${file.original_name} saved as a default File Library source for this block.`);
+  }
+
   function getNodeField(node: BuilderNode, key: string) {
     return node.data.config[key];
   }
@@ -1852,37 +1906,45 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               <button
                 type="button"
                 onClick={onBack}
-                className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-semibold text-ink"
+                className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-semibold text-ink"
               >
+                <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
                 Workflows
               </button>
             ) : null}
-            <span className="hidden rounded-full bg-ink px-3 py-2 text-[11px] font-bold uppercase tracking-[0.22em] text-white sm:inline-flex">
+            <span className="hidden items-center gap-1.5 rounded-full bg-ink px-3 py-2 text-[11px] font-bold uppercase tracking-[0.22em] text-white sm:inline-flex">
+              <Sparkles className="h-3.5 w-3.5" aria-hidden />
               AI Studio
             </span>
             <span className="max-w-[36vw] truncate px-2 text-sm font-semibold text-ink">
               {statusMessage}
             </span>
-            <span className="hidden rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold text-ink/65 md:inline-flex">
+            <span className="hidden items-center gap-1.5 rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold text-ink/65 md:inline-flex">
+              <Bot className="h-3.5 w-3.5" aria-hidden />
               {workflowModeLabel}
             </span>
-            <span className="rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-ink/65 ring-1 ring-ink/8">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-ink/65 ring-1 ring-ink/8">
+              <Boxes className="h-3.5 w-3.5" aria-hidden />
               {nodes.length} blocks
             </span>
-            <span className="hidden rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-ink/65 ring-1 ring-ink/8 sm:inline-flex">
+            <span className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-ink/65 ring-1 ring-ink/8 sm:inline-flex">
+              <ArchiveRestore className="h-3.5 w-3.5" aria-hidden />
               {edges.length} links
             </span>
-            <span className={`rounded-full px-3 py-1.5 text-[11px] font-bold ${blockerCount ? "bg-coral/25 text-ink" : "bg-lime/35 text-ink"}`}>
+            <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold ${blockerCount ? "bg-coral/25 text-ink" : "bg-lime/35 text-ink"}`}>
+              <ClipboardCheck className="h-3.5 w-3.5" aria-hidden />
               {blockerCount ? `${blockerCount} blockers` : "Ready"}
             </span>
           </div>
         </header>
 
         <div className="absolute left-4 top-1/2 z-30 flex -translate-y-1/2 flex-col gap-2">
-          <button type="button" onClick={() => setIsPaletteOpen(true)} className="rounded-2xl bg-ink px-2.5 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white shadow-panel [writing-mode:vertical-rl]">
+          <button type="button" onClick={() => setIsPaletteOpen(true)} className="flex min-h-28 items-center justify-center gap-2 rounded-2xl bg-ink px-2.5 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white shadow-panel [writing-mode:vertical-rl]">
+            <PanelLeftOpen className="h-4 w-4" aria-hidden />
             Blocks
           </button>
-          <button type="button" onClick={() => setIsInspectorOpen(true)} className="rounded-2xl bg-white px-2.5 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-ink shadow-panel ring-1 ring-ink/8 [writing-mode:vertical-rl]">
+          <button type="button" onClick={() => setIsInspectorOpen(true)} className="flex min-h-28 items-center justify-center gap-2 rounded-2xl bg-white px-2.5 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-ink shadow-panel ring-1 ring-ink/8 [writing-mode:vertical-rl]">
+            <PanelRightOpen className="h-4 w-4" aria-hidden />
             Inspect
           </button>
         </div>
@@ -1903,7 +1965,10 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
           <aside className={`absolute bottom-4 left-4 top-4 z-40 w-[min(300px,calc(100vw-2rem))] overflow-auto rounded-[1.35rem] border border-white/70 bg-white/90 p-2.5 shadow-panel backdrop-blur transition-transform duration-300 ${isPaletteOpen ? "translate-x-0" : "-translate-x-[115%]"}`}>
             <div className="mb-2 flex items-start justify-between gap-3">
               <div>
-                <h2 className="text-base font-semibold">Blocks</h2>
+                <h2 className="flex items-center gap-2 text-base font-semibold">
+                  <Boxes className="h-4 w-4" aria-hidden />
+                  Blocks
+                </h2>
                 <p className="mt-0.5 text-[11px] leading-4 text-ink/58">
                   Drag to canvas or click to add.
                 </p>
@@ -1985,13 +2050,15 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
           <div className="h-full overflow-hidden rounded-[1.7rem] border border-white/70 bg-white/58 shadow-panel backdrop-blur">
             <div className="pointer-events-none absolute right-6 top-5 z-10 hidden lg:block">
               <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-full border border-ink/10 bg-white/90 px-3 py-2 shadow-panel backdrop-blur">
-                <button type="button" onClick={() => void openSaveDialog()} className="rounded-full bg-ink px-3 py-1.5 text-[11px] font-semibold text-white">Save</button>
-                <button type="button" onClick={loadGraph} className="rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">Load</button>
-                <button type="button" onClick={resetGraph} className="rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">Reset</button>
-                <button type="button" onClick={startRunWorkflow} disabled={isRunning} className="rounded-full bg-lime px-3 py-2 text-xs font-bold text-ink disabled:opacity-60">
+                <button type="button" onClick={() => void openSaveDialog()} className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[11px] font-semibold text-white"><Save className="h-3.5 w-3.5" aria-hidden />Save</button>
+                <button type="button" onClick={loadGraph} className="inline-flex items-center gap-1.5 rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold"><FolderOpen className="h-3.5 w-3.5" aria-hidden />Load</button>
+                <button type="button" onClick={resetGraph} className="inline-flex items-center gap-1.5 rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold"><RotateCcw className="h-3.5 w-3.5" aria-hidden />Reset</button>
+                <button type="button" onClick={startRunWorkflow} disabled={isRunning} className="inline-flex items-center gap-1.5 rounded-full bg-lime px-3 py-2 text-xs font-bold text-ink disabled:opacity-60">
+                  <Play className="h-3.5 w-3.5" aria-hidden />
                   {isRunning ? "Running" : "Run"}
                 </button>
-                <button type="button" onClick={publishCurrentWorkflow} disabled={isRunning || !isCurrentChatWorkflow} className="rounded-full bg-coral/80 px-3 py-2 text-xs font-bold text-ink disabled:opacity-40">
+                <button type="button" onClick={publishCurrentWorkflow} disabled={isRunning || !isCurrentChatWorkflow} className="inline-flex items-center gap-1.5 rounded-full bg-coral/80 px-3 py-2 text-xs font-bold text-ink disabled:opacity-40">
+                  <Rocket className="h-3.5 w-3.5" aria-hidden />
                   Publish
                 </button>
               </div>
@@ -2033,13 +2100,16 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                       placeholder="Search nodes"
                       className="w-36 rounded-full bg-mist px-3 py-1.5 text-[11px] outline-none"
                     />
-                    <button type="button" onClick={focusSearchedNode} className="rounded-full bg-ink px-3 py-1.5 text-[11px] font-semibold text-white">
+                    <button type="button" onClick={focusSearchedNode} className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[11px] font-semibold text-white">
+                      <Search className="h-3.5 w-3.5" aria-hidden />
                       Find
                     </button>
-                    <button type="button" onClick={zoomToFit} className="rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">
+                    <button type="button" onClick={zoomToFit} className="inline-flex items-center gap-1.5 rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">
+                      <Maximize2 className="h-3.5 w-3.5" aria-hidden />
                       Fit
                     </button>
-                    <button type="button" onClick={autoLayout} className="rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">
+                    <button type="button" onClick={autoLayout} className="inline-flex items-center gap-1.5 rounded-full bg-mist px-3 py-1.5 text-[11px] font-semibold">
+                      <LayoutDashboard className="h-3.5 w-3.5" aria-hidden />
                       Layout
                     </button>
                   </div>
@@ -2235,6 +2305,19 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                             </button>
                           ))}
                         </div>
+                        <div className="mt-3 max-h-32 space-y-2 overflow-auto border-t border-ink/8 pt-3">
+                          {libraryFiles.map((file) => (
+                            <button
+                              key={`default-${file.id}`}
+                              type="button"
+                              onClick={() => saveLibraryFileAsNodeDefault(file)}
+                              className="flex w-full items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-left text-xs font-semibold text-ink transition hover:bg-sand/70"
+                            >
+                              <span className="truncate">Make default: {file.original_name}</span>
+                              <span className="shrink-0 text-ink/45">ID {file.id}</span>
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     ) : null}
                     <button
@@ -2295,18 +2378,27 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                 {selectedNode.data.blockType === "condition" && inspectorTab === "config" ? (
                   <div className="rounded-[1.4rem] bg-mist/70 p-4">
                     <p className="text-sm font-semibold text-ink">Condition Builder</p>
+                    <p className="mt-1 text-xs leading-5 text-ink/55">Pick a safe rule preset. It writes both the visual JSON rule and the legacy expression fallback.</p>
                     <div className="mt-3 grid grid-cols-2 gap-2">
-                      {["exists", "boolean", "contains:urgent", "equals:approved"].map((rule) => (
+                      {[
+                        { label: "Exists", operator: "exists" as const, value: "" },
+                        { label: "Boolean true", operator: "boolean" as const, value: "" },
+                        { label: "Contains urgent", operator: "contains" as const, value: "urgent" },
+                        { label: "Equals approved", operator: "equals" as const, value: "approved" },
+                      ].map((rule) => (
                         <button
-                          key={rule}
+                          key={rule.label}
                           type="button"
-                          onClick={() => updateSelectedNodeField({ key: "expression", label: "Expression", kind: "text", defaultValue: rule }, rule)}
+                          onClick={() => applyConditionRule(rule.operator, rule.value)}
                           className="rounded-2xl bg-white px-3 py-2 text-xs font-semibold"
                         >
-                          {rule}
+                          {rule.label}
                         </button>
                       ))}
                     </div>
+                    <pre className="mt-3 max-h-28 overflow-auto rounded-2xl bg-white p-3 text-[11px] leading-5 text-ink/65">
+                      {String(selectedNode.data.config.rules || "No visual rules yet.")}
+                    </pre>
                   </div>
                 ) : null}
 
@@ -2333,6 +2425,11 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                       <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap">
                         {String(selectedNode.data.config.schemaPrompt || "No schema prompt yet. Add fields above.")}
                       </pre>
+                      {selectedNode.data.config.schemaFields ? (
+                        <pre className="mt-2 max-h-36 overflow-auto rounded-xl bg-mist/70 p-2 font-mono text-[11px]">
+                          {String(selectedNode.data.config.schemaFields)}
+                        </pre>
+                      ) : null}
                     </div>
                     <div className="mt-3 grid gap-2">
                       {[

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, Bot, Edit3, MessageSquareText, Play, UserRound, Workflow } from "lucide-react";
 import {
   executeWorkflowAsync,
   getRunEventsUrl,
@@ -321,24 +322,32 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
       <div className="mx-auto grid max-w-7xl gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
         <aside className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={onBack} className="rounded-full bg-mist px-4 py-2 text-sm font-semibold">
+            <button type="button" onClick={onBack} className="inline-flex items-center gap-2 rounded-full bg-mist px-4 py-2 text-sm font-semibold">
+              <ArrowLeft className="h-4 w-4" aria-hidden />
               Workflows
             </button>
             {workflow ? (
-              <button type="button" onClick={() => onOpenBuilder(workflow.id)} className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
+              <button type="button" onClick={() => onOpenBuilder(workflow.id)} className="inline-flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
+                <Edit3 className="h-4 w-4" aria-hidden />
                 Edit Builder
               </button>
             ) : null}
           </div>
           <p className="mt-6 text-xs font-semibold uppercase tracking-[0.34em] text-ink/45">{appKind} App</p>
-          <h1 className="mt-2 text-4xl font-bold tracking-tight">{workflow?.name || `Workflow #${workflowId}`}</h1>
+          <h1 className="mt-2 flex items-center gap-3 text-4xl font-bold tracking-tight">
+            <Workflow className="h-9 w-9 text-lime" aria-hidden />
+            {workflow?.name || `Workflow #${workflowId}`}
+          </h1>
           <p className="mt-3 text-sm leading-6 text-ink/62">
             {getWorkflowAppDescription(appKind, workflow?.description)}
           </p>
           <p className="mt-4 rounded-[1.35rem] bg-mist/80 p-3 text-sm font-semibold text-ink/72">{status}</p>
 
           <label className="mt-5 block">
-            <span className="text-sm font-semibold">Default message / question</span>
+            <span className="inline-flex items-center gap-2 text-sm font-semibold">
+              <MessageSquareText className="h-4 w-4" aria-hidden />
+              Default message / question
+            </span>
             <textarea
               rows={3}
               value={defaultMessage}
@@ -348,11 +357,17 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
           </label>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
             <label className="block">
-              <span className="text-sm font-semibold">Session ID</span>
+              <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                <Bot className="h-4 w-4" aria-hidden />
+                Session ID
+              </span>
               <input value={sessionId} onChange={(event) => setSessionId(event.target.value)} className="mt-2 w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none" />
             </label>
             <label className="block">
-              <span className="text-sm font-semibold">Runtime User ID</span>
+              <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                <UserRound className="h-4 w-4" aria-hidden />
+                Runtime User ID
+              </span>
               <input value={userId} onChange={(event) => setUserId(event.target.value)} className="mt-2 w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none" />
             </label>
           </div>
@@ -369,8 +384,9 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
                 type="button"
                 onClick={() => void runWorkflowApp()}
                 disabled={isRunning || !workflow}
-                className="rounded-full bg-lime px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-full bg-lime px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-60"
               >
+                <Play className="h-4 w-4" aria-hidden />
                 {isRunning ? "Running..." : "Run App"}
               </button>
               <button

@@ -28,6 +28,7 @@ from app.services.llm import LlmMessage, LlmProvider, get_default_llm_provider
 from app.services.parsers import parse_uploaded_file
 from app.services.rag import (
     build_rag_config,
+    clear_collection_records,
     ingest_documents,
     retrieve_relevant_chunks,
     should_ingest_documents,
@@ -426,15 +427,28 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
     files = runtime.files if runtime else []
     if not files and runtime and isinstance(runtime.value, list):
         files = [str(item) for item in runtime.value]
+    library_file_ids = parse_library_file_ids(node["data"]["config"].get("libraryFileIds"))
+    library_files = load_library_files(context, library_file_ids)
     if not files:
         files = parse_default_file_paths(node["data"]["config"].get("defaultLocalPaths"))
-    if not files:
+    if not files and not library_files:
         raise ValueError("File Upload node requires runtime file paths.")
 
     max_size_bytes = parse_max_size_bytes(node["data"]["config"])
     accepted_extensions = parse_accept_extensions(node["data"]["config"].get("accept"))
     persisted_files: list[UploadedFile] = []
     persisted_file_metadata: list[dict[str, Any]] = []
+    for library_file in library_files:
+        if library_file.extension not in accepted_extensions:
+            raise ValueError(
+                f"Library file '{library_file.original_name}' has extension '{library_file.extension}'. "
+                f"Allowed types: {', '.join(sorted(accepted_extensions))}."
+            )
+        if library_file.size_bytes > max_size_bytes:
+            raise ValueError(f"Library file '{library_file.original_name}' exceeds max upload size of {max_size_bytes} bytes.")
+        context.uploaded_files_by_node[node["id"]].append(library_file)
+        persisted_files.append(library_file)
+        persisted_file_metadata.append(uploaded_file_metadata(library_file, source="file_library"))
     for file_path in files:
         resolved = resolve_runtime_file_path(file_path)
         uploaded_file = persist_uploaded_file(
@@ -448,16 +462,7 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
         )
         context.uploaded_files_by_node[node["id"]].append(uploaded_file)
         persisted_files.append(uploaded_file)
-        persisted_file_metadata.append(
-            {
-                "id": uploaded_file.id,
-                "original_name": uploaded_file.original_name,
-                "storage_path": uploaded_file.storage_path,
-                "extension": uploaded_file.extension,
-                "size_bytes": uploaded_file.size_bytes,
-                "mime_type": uploaded_file.mime_type,
-            }
-        )
+        persisted_file_metadata.append(uploaded_file_metadata(uploaded_file, source="runtime_or_default_path"))
 
     payload = typed_payload(
         "file",
@@ -471,6 +476,8 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
             "files": persisted_file_metadata,
             "accepted_extensions": sorted(accepted_extensions),
             "max_size_bytes": max_size_bytes,
+            "source_mode": node["data"]["config"].get("sourceMode", "runtime_or_library"),
+            "library_file_ids": library_file_ids,
             "count": len(persisted_file_metadata),
         },
         {"count": len(persisted_file_metadata), "extensions": sorted({file["extension"] for file in persisted_file_metadata})},
@@ -481,6 +488,48 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
         preview={"label": node["data"]["label"], "output": payload.preview, "metadata": metadata_payload.preview},
         logs=[log_entry("info", f"{len(persisted_files)} file(s) staged.")],
     )
+
+
+def uploaded_file_metadata(uploaded_file: UploadedFile, *, source: str) -> dict[str, Any]:
+    return {
+        "id": uploaded_file.id,
+        "original_name": uploaded_file.original_name,
+        "storage_path": uploaded_file.storage_path,
+        "extension": uploaded_file.extension,
+        "size_bytes": uploaded_file.size_bytes,
+        "mime_type": uploaded_file.mime_type,
+        "source": source,
+    }
+
+
+def parse_library_file_ids(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value).replace("\n", ",").split(",")
+    ids: list[int] = []
+    for item in raw_items:
+        text = str(item).strip()
+        if not text:
+            continue
+        try:
+            ids.append(int(text))
+        except ValueError:
+            raise ValueError(f"Invalid File Library id '{text}'.")
+    return ids
+
+
+def load_library_files(context: ExecutionContext, file_ids: list[int]) -> list[UploadedFile]:
+    if not file_ids:
+        return []
+    files = list(context.session.scalars(select(UploadedFile).where(UploadedFile.id.in_(file_ids))))
+    found_ids = {file.id for file in files}
+    missing_ids = [file_id for file_id in file_ids if file_id not in found_ids]
+    if missing_ids:
+        raise ValueError(f"File Library file(s) not found: {', '.join(str(file_id) for file_id in missing_ids)}.")
+    return files
 
 
 def parse_default_file_paths(value: Any) -> list[str]:
@@ -508,20 +557,65 @@ def resolve_runtime_file_path(file_path: str) -> Path:
     return (repo_root / path).resolve()
 
 
+def build_extraction_quality_report(uploaded_file: UploadedFile, text: str, parser_metadata: dict[str, Any]) -> dict[str, Any]:
+    words = re.findall(r"\w+", text)
+    warnings: list[str] = []
+    if not text.strip():
+        warnings.append("No extractable text found. OCR may be required in a future OCR block.")
+    if uploaded_file.extension == ".pdf" and parser_metadata.get("page_count") and len(words) < 20:
+        warnings.append("PDF text is very short for its page count; it may be scanned or image-heavy.")
+    detected_tables = int(parser_metadata.get("row_count", 0) or text.count("\n|"))
+    return {
+        "file_id": uploaded_file.id,
+        "file_name": uploaded_file.original_name,
+        "parser": parser_metadata.get("parser", "unknown"),
+        "extension": uploaded_file.extension,
+        "page_count": parser_metadata.get("page_count"),
+        "line_count": parser_metadata.get("line_count", len(text.splitlines())),
+        "word_count": len(words),
+        "character_count": len(text),
+        "detected_tables": detected_tables,
+        "warnings": warnings,
+        "preview_snippet": preview_text(text, 500),
+    }
+
+
+def summarize_extraction_quality(quality_reports: list[dict[str, Any]], failed_documents: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "parser_names": sorted({str(report.get("parser")) for report in quality_reports if report.get("parser")}),
+        "document_count": len(quality_reports),
+        "failed_count": len(failed_documents),
+        "total_words": sum(int(report.get("word_count", 0) or 0) for report in quality_reports),
+        "total_characters": sum(int(report.get("character_count", 0) or 0) for report in quality_reports),
+        "total_detected_tables": sum(int(report.get("detected_tables", 0) or 0) for report in quality_reports),
+        "warnings": [warning for report in quality_reports for warning in report.get("warnings", [])],
+        "documents": quality_reports,
+    }
+
+
 def execute_text_extraction(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     file_payloads = context.node_inputs[node["id"]].get("file", [])
     if not file_payloads:
         raise ValueError("Text Extraction requires a file input.")
 
     strategy = str(node["data"]["config"].get("strategy", "auto"))
+    include_quality_report = bool(node["data"]["config"].get("qualityReport", True))
     extracted_documents: list[dict[str, Any]] = []
     combined_text_parts: list[str] = []
+    quality_reports: list[dict[str, Any]] = []
+    failed_documents: list[dict[str, Any]] = []
     for payload in file_payloads:
         upload_entries = payload.value if isinstance(payload.value, list) else [payload.value]
         for upload_entry in upload_entries:
             uploaded_file = resolve_uploaded_file(context, upload_entry)
-            parsed_document = parse_uploaded_file(uploaded_file, strategy=strategy)
+            try:
+                parsed_document = parse_uploaded_file(uploaded_file, strategy=strategy)
+            except Exception as exc:
+                failed_documents.append({"id": uploaded_file.id, "original_name": uploaded_file.original_name, "error": str(exc)})
+                continue
             combined_text_parts.append(parsed_document.text)
+            quality = build_extraction_quality_report(uploaded_file, parsed_document.text, parsed_document.metadata)
+            quality_reports.append(quality)
             extracted_documents.append(
                 {
                     "id": uploaded_file.id,
@@ -531,25 +625,30 @@ def execute_text_extraction(node: dict[str, Any], context: ExecutionContext) -> 
                         "original_name": uploaded_file.original_name,
                         "extension": uploaded_file.extension,
                         "size_bytes": uploaded_file.size_bytes,
+                        "quality": quality,
                         **parsed_document.metadata,
                     },
                 }
             )
+    if failed_documents and not extracted_documents:
+        raise ValueError(f"Text Extraction failed for all files: {failed_documents[0]['error']}")
 
     combined_text = "\n\n".join(combined_text_parts)
+    aggregate_quality = summarize_extraction_quality(quality_reports, failed_documents)
     payload = typed_payload(
         "document",
         {
             "documents": extracted_documents,
             "combined_text": combined_text,
-            "metadata": {"document_count": len(extracted_documents), "strategy": strategy},
+            "metadata": {"document_count": len(extracted_documents), "strategy": strategy, "quality": aggregate_quality},
         },
         {
             "text_preview": preview_text(combined_text),
             "document_count": len(extracted_documents),
             "strategy": strategy,
+            "quality": aggregate_quality if include_quality_report else None,
         },
-        {"document_count": len(extracted_documents), "strategy": strategy},
+        {"document_count": len(extracted_documents), "strategy": strategy, "failed_count": len(failed_documents)},
     )
     text_payload = typed_payload(
         "text",
@@ -564,14 +663,16 @@ def execute_text_extraction(node: dict[str, Any], context: ExecutionContext) -> 
             "strategy": strategy,
             "documents": [document["metadata"] for document in extracted_documents],
             "text_length": len(combined_text),
+            "quality": aggregate_quality,
+            "failed_documents": failed_documents,
         },
-        {"document_count": len(extracted_documents), "text_length": len(combined_text)},
-        {"strategy": strategy},
+        {"document_count": len(extracted_documents), "text_length": len(combined_text), "failed_count": len(failed_documents)},
+        {"strategy": strategy, "failed_count": len(failed_documents)},
     )
     return NodeExecutionResult(
         outputs={"document": payload, "text": text_payload, "metadata": metadata_payload},
         preview={"label": node["data"]["label"], "output": payload.preview, "text": text_payload.preview},
-        logs=[log_entry("info", f"Extracted text from {len(extracted_documents)} document(s).")],
+        logs=[log_entry("info", f"Extracted text from {len(extracted_documents)} document(s); {len(failed_documents)} failed.")],
     )
 
 
@@ -587,8 +688,12 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
         "chunks_indexed": 0,
         "collection_name": rag_config.collection_name,
         "mode": rag_config.ingest_mode,
+        "refresh": None,
     }
+    if rag_config.ingest_mode == "refresh_collection":
+        ingest_summary["refresh"] = clear_collection_records(context.session, workflow=context.workflow, rag_config=rag_config)
     if documents and should_ingest_documents(rag_config):
+        refresh_summary = ingest_summary.get("refresh")
         ingest_summary = ingest_documents(
             context.session,
             workflow=context.workflow,
@@ -597,6 +702,7 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
             rag_config=rag_config,
             documents=documents,
         )
+        ingest_summary["refresh"] = refresh_summary
 
     query = str(first_payload_value(query_payloads) or "")
     retrieved_chunks = (
@@ -619,6 +725,8 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
         }
         for item in retrieved_chunks
     ]
+    if rag_config.rerank:
+        ranked_documents.sort(key=lambda item: ((item["score"] if item["score"] is not None else 999), -len(str(item.get("snippet", "")))))
     payload = typed_payload(
         "knowledge",
         {
@@ -632,6 +740,8 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
             "answer_guidance": "Pass this into a Chatbot context input to generate a natural answer with citations.",
             "ingest_summary": ingest_summary,
             "mode": rag_config.ingest_mode,
+            "retrieval_strategy": rag_config.retrieval_strategy,
+            "rerank": rag_config.rerank,
             "source_metadata": [item["metadata"] for item in ranked_documents],
         },
         {
@@ -639,6 +749,8 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
             "collection_name": rag_config.collection_name,
             "mode": rag_config.ingest_mode,
             "tags": rag_config.tags,
+            "retrieval_strategy": rag_config.retrieval_strategy,
+            "rerank": rag_config.rerank,
         },
     )
     matches_payload = typed_payload(
@@ -659,6 +771,9 @@ def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> No
             "matches_returned": len(ranked_documents),
             "has_query": bool(query.strip()),
             "tags": rag_config.tags,
+            "retrieval_strategy": rag_config.retrieval_strategy,
+            "rerank": rag_config.rerank,
+            "refresh": ingest_summary.get("refresh"),
         },
         {"collection_name": rag_config.collection_name, "matches_returned": len(ranked_documents), "chunks_indexed": ingest_summary["chunks_indexed"]},
         {"collection_name": rag_config.collection_name},
@@ -690,6 +805,8 @@ def execute_chatbot(
     model = str(node["data"]["config"].get("model", settings.openrouter_model))
     temperature = float(node["data"]["config"].get("temperature", 0.2))
     answer_style = str(node["data"]["config"].get("answerStyle", "conversational"))
+    output_mode = str(node["data"]["config"].get("outputMode", "chat"))
+    response_schema = str(node["data"]["config"].get("responseSchema", "")).strip()
 
     context_text = render_chatbot_context(context_value)
     memory_text = render_memory_context(context_payloads)
@@ -703,6 +820,8 @@ def execute_chatbot(
         context_text=context_text,
         memory_text=memory_text,
         answer_style=answer_style,
+        output_mode=output_mode,
+        response_schema=response_schema,
     )
     llm_response = llm_provider.generate(
         model=model,
@@ -729,6 +848,8 @@ def execute_chatbot(
             "message": message,
             "system_prompt": system_prompt,
             "answer_style": answer_style,
+            "output_mode": output_mode,
+            "response_schema": response_schema,
             "context_used": context_text,
             "memory_used": memory_text,
             "citations": citations,
@@ -748,6 +869,7 @@ def execute_chatbot(
             "citation_count": len(citations),
             "source_chunk_count": len(source_chunks),
             "answer_style": answer_style,
+            "output_mode": output_mode,
         },
     )
     citations_payload = typed_payload(
@@ -765,6 +887,7 @@ def execute_chatbot(
             "citations": citations,
             "source_chunks": source_chunks,
             "answer_style": answer_style,
+            "output_mode": output_mode,
         },
         logs=[
             log_entry(
@@ -884,6 +1007,7 @@ def execute_extraction_ai(
 
     model = str(node["data"]["config"].get("model", settings.openrouter_model))
     schema_prompt = str(node["data"]["config"].get("schemaPrompt", ""))
+    schema_fields = parse_schema_fields(node["data"]["config"].get("schemaFields", ""))
     strict_mode = bool(node["data"]["config"].get("strictMode", True))
     llm_provider = provider or get_default_llm_provider()
     messages = [
@@ -892,7 +1016,8 @@ def execute_extraction_ai(
             content=(
                 "Extract structured information from the content. "
                 "Return JSON only, with no markdown fences. "
-                f"Strict JSON mode: {strict_mode}. Schema instructions: {schema_prompt}"
+                f"Strict JSON mode: {strict_mode}. Schema instructions: {schema_prompt}. "
+                f"Visual schema fields: {json.dumps(schema_fields, default=str)}"
             ),
         ),
         LlmMessage(role="user", content=content_text),
@@ -904,12 +1029,13 @@ def execute_extraction_ai(
         {
             "extracted": extracted,
             "schema_prompt": schema_prompt,
+            "schema_fields": schema_fields,
             "strict_mode": strict_mode,
             "model": model,
             "provider": response.provider,
         },
-        {"extracted_preview": preview_text(extracted), "strict_mode": strict_mode},
-        {"model": model, "provider": response.provider, "strict_mode": strict_mode},
+        {"extracted_preview": preview_text(extracted), "strict_mode": strict_mode, "field_count": len(schema_fields)},
+        {"model": model, "provider": response.provider, "strict_mode": strict_mode, "field_count": len(schema_fields)},
     )
     return single_output_result(
         "json",
@@ -1353,9 +1479,10 @@ def execute_conversation_memory(node: dict[str, Any], context: ExecutionContext)
 
 def execute_merge(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     mode = str(node["data"]["config"].get("mode", "append"))
+    field_paths = parse_field_paths(node["data"]["config"].get("fieldPaths", ""))
     left_payloads = context.node_inputs[node["id"]].get("left", [])
     right_payloads = context.node_inputs[node["id"]].get("right", [])
-    merged_value = merge_structured_payloads(mode, left_payloads, right_payloads)
+    merged_value = merge_structured_payloads(mode, left_payloads, right_payloads, field_paths=field_paths)
 
     payload = typed_payload(
         "json",
@@ -1365,11 +1492,11 @@ def execute_merge(node: dict[str, Any], context: ExecutionContext) -> NodeExecut
             "combined_preview": preview_text(merged_value.get("combined_text", merged_value)),
             "input_count": merged_value["input_count"],
         },
-        {"mode": mode, "input_count": merged_value["input_count"]},
+        {"mode": mode, "input_count": merged_value["input_count"], "field_paths": field_paths},
     )
     details_payload = typed_payload(
         "json",
-        {"mode": mode, "merged": merged_value, "input_count": merged_value["input_count"]},
+        {"mode": mode, "merged": merged_value, "input_count": merged_value["input_count"], "field_paths": field_paths},
         {"mode": mode, "input_count": merged_value["input_count"]},
         {"mode": mode},
     )
@@ -1382,8 +1509,9 @@ def execute_merge(node: dict[str, Any], context: ExecutionContext) -> NodeExecut
 
 def execute_condition(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     expression = str(node["data"]["config"].get("expression", ""))
+    rules = str(node["data"]["config"].get("rules", "") or "")
     value = merge_payload_values(context.node_inputs[node["id"]].get("value", []))
-    evaluation = evaluate_condition_rule(expression, value)
+    evaluation = evaluate_condition_rules(rules, value) if rules.strip() else evaluate_condition_rule(expression, value)
     branch = "true" if evaluation["matched"] else "false"
     payload = typed_payload(
         "any",
@@ -1399,7 +1527,7 @@ def execute_condition(node: dict[str, Any], context: ExecutionContext) -> NodeEx
             "rule": evaluation["rule"],
             "input_preview": preview_text(value),
         },
-        {"expression": expression, "branch": branch},
+        {"expression": expression, "rules": rules, "branch": branch},
     )
     evaluation_payload = typed_payload("json", evaluation, {"matched": evaluation["matched"], "rule": evaluation["rule"], "branch": branch}, {"expression": expression})
     outputs: dict[str, TypedPayload] = {branch: payload, "evaluation": evaluation_payload}
@@ -1461,18 +1589,24 @@ def execute_json_output(node: dict[str, Any], context: ExecutionContext) -> Node
 def execute_dashboard_preview(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     content = merge_payload_values(context.node_inputs[node["id"]].get("content", []))
     preview_mode = str(node["data"]["config"].get("view", "auto"))
+    card_layout = str(node["data"]["config"].get("cardLayout", "balanced"))
+    cards = build_preview_cards(content, preview_mode)
     payload = typed_payload(
         "preview",
         {
             "mode": preview_mode,
+            "layout": card_layout,
             "content": content,
             "summary": summarize_preview_content(content),
+            "cards": cards,
         },
         {
             "mode": preview_mode,
+            "layout": card_layout,
             "summary": summarize_preview_content(content),
+            "card_count": len(cards),
         },
-        {"view": preview_mode},
+        {"view": preview_mode, "cardLayout": card_layout},
     )
     return single_output_result("result", payload, node["data"]["label"], "Dashboard preview generated.")
 
@@ -1481,19 +1615,25 @@ def execute_logger(node: dict[str, Any], context: ExecutionContext) -> NodeExecu
     payload_inputs = context.node_inputs[node["id"]].get("payload", [])
     payload_value = merge_payload_values(payload_inputs)
     level = str(node["data"]["config"].get("level", "info"))
-    log = log_entry(level, f"Logger captured payload: {preview_text(payload_value)}")
+    trace_mode = str(node["data"]["config"].get("traceMode", "friendly"))
+    debug_trace = build_debug_trace(payload_value, payload_inputs, trace_mode)
+    log = log_entry(level, debug_trace["what_happened"])
     payload = typed_payload(
         "log",
         {
             "level": level,
+            "trace_mode": trace_mode,
             "payload": payload_value,
             "summary": summarize_preview_content(payload_value),
+            "debug_trace": debug_trace,
         },
         {
             "level": level,
+            "trace_mode": trace_mode,
             "summary": summarize_preview_content(payload_value),
+            "what_happened": debug_trace["what_happened"],
         },
-        {"level": level},
+        {"level": level, "traceMode": trace_mode},
     )
     return NodeExecutionResult(outputs={"log": payload}, preview={"level": level, "payload": payload_value}, logs=[log])
 
@@ -1561,10 +1701,45 @@ def evaluate_condition_rule(expression: str, value: Any) -> dict[str, Any]:
     return {"matched": bool(value), "rule": expression or "truthy"}
 
 
+def evaluate_condition_rules(raw_rules: str, value: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw_rules)
+    except json.JSONDecodeError:
+        return {"matched": False, "rule": "invalid rules json", "error": "Rules must be valid JSON."}
+    logic = str(payload.get("logic", "and")).lower() if isinstance(payload, dict) else "and"
+    rules = payload.get("rules", []) if isinstance(payload, dict) else []
+    evaluations = [evaluate_single_visual_rule(rule, value) for rule in rules if isinstance(rule, dict)]
+    if not evaluations:
+        return {"matched": bool(value), "rule": "empty visual rules", "evaluations": []}
+    matched = any(item["matched"] for item in evaluations) if logic == "or" else all(item["matched"] for item in evaluations)
+    return {"matched": matched, "rule": f"visual:{logic}", "logic": logic, "evaluations": evaluations}
+
+
+def evaluate_single_visual_rule(rule: dict[str, Any], value: Any) -> dict[str, Any]:
+    field = str(rule.get("field", "") or "")
+    operator = str(rule.get("operator", "exists") or "exists")
+    expected = rule.get("value", "")
+    target = get_nested_value(value, field) if field and isinstance(value, dict) else value
+    text_target = "" if target is None else str(target)
+    if operator == "exists":
+        matched = target not in (None, "", [], {})
+    elif operator == "equals":
+        matched = text_target == str(expected)
+    elif operator == "contains":
+        matched = str(expected).lower() in text_target.lower()
+    elif operator == "boolean":
+        matched = bool(target)
+    else:
+        matched = False
+    return {"field": field, "operator": operator, "expected": expected, "actual_preview": preview_text(target), "matched": matched}
+
+
 def merge_structured_payloads(
     mode: str,
     left_payloads: list[TypedPayload],
     right_payloads: list[TypedPayload],
+    *,
+    field_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     left_values = [payload.value for payload in left_payloads]
     right_values = [payload.value for payload in right_payloads]
@@ -1583,6 +1758,34 @@ def merge_structured_payloads(
     elif mode == "template":
         combined_text = f"LEFT:\n{merge_payload_values(left_payloads)}\n\nRIGHT:\n{merge_payload_values(right_payloads)}"
         merged_object = {"template": combined_text}
+    elif mode == "select_fields":
+        source = merge_payload_values(left_payloads + right_payloads)
+        selected = {path: get_nested_value(source, path) for path in (field_paths or []) if isinstance(source, dict)}
+        merged_object = {"selected": selected}
+        combined_text = json.dumps(selected, default=str)
+    elif mode == "flatten_arrays":
+        flattened: list[Any] = []
+        for value in all_values:
+            flattened.extend(normalize_items(value))
+        merged_object = {"items": flattened}
+        combined_text = json.dumps(flattened, default=str)
+    elif mode == "dedupe_chunks":
+        seen: set[str] = set()
+        chunks: list[Any] = []
+        for value in all_values:
+            for item in normalize_items(value):
+                key = json.dumps(item, sort_keys=True, default=str) if isinstance(item, (dict, list)) else str(item)
+                if key not in seen:
+                    seen.add(key)
+                    chunks.append(item)
+        merged_object = {"items": chunks, "deduplicated_count": len(chunks)}
+        combined_text = json.dumps(chunks, default=str)
+    elif mode == "preserve_metadata":
+        merged_object = {
+            "values": all_values,
+            "metadata": [payload.metadata for payload in left_payloads + right_payloads],
+        }
+        combined_text = json.dumps(merged_object, default=str)
     else:
         combined_text = "\n".join(str(value) for value in all_values if value not in (None, ""))
         merged_object = {"text": combined_text}
@@ -1594,6 +1797,10 @@ def merge_structured_payloads(
         "combined_text": combined_text,
         "merged_object": merged_object,
     }
+
+
+def parse_field_paths(raw: Any) -> list[str]:
+    return [item.strip() for item in str(raw or "").replace("\n", ",").split(",") if item.strip()]
 
 
 def split_text_sections(content: str, *, mode: str, max_chars: int) -> list[dict[str, Any]]:
@@ -1672,6 +1879,27 @@ def parse_mappings(raw: str) -> list[tuple[str, str]]:
     return mappings
 
 
+def parse_schema_fields(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [field for field in raw if isinstance(field, dict)]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [
+            {"name": line.strip().lstrip("-").split(":", 1)[0].strip(), "type": "string", "required": True}
+            for line in text.splitlines()
+            if line.strip()
+        ]
+    if isinstance(parsed, list):
+        return [field for field in parsed if isinstance(field, dict)]
+    if isinstance(parsed, dict):
+        return [{"name": key, **(value if isinstance(value, dict) else {"type": str(value)})} for key, value in parsed.items()]
+    return []
+
+
 def get_nested_value(source: dict[str, Any], key: str) -> Any:
     value: Any = source
     for part in key.split("."):
@@ -1704,6 +1932,42 @@ def normalize_rows(value: Any) -> list[dict[str, Any]]:
         else:
             rows.append({"value": item})
     return rows or [{"value": value}]
+
+
+def build_preview_cards(content: Any, mode: str) -> list[dict[str, Any]]:
+    summary = summarize_preview_content(content)
+    cards = [{"type": "summary", "title": "Summary", "value": summary}]
+    if isinstance(content, dict):
+        if content.get("citations") or content.get("source_chunks"):
+            cards.append({"type": "citations", "title": "Sources", "value": content.get("citations") or content.get("source_chunks")})
+        if content.get("errors") or content.get("error"):
+            cards.append({"type": "error", "title": "Errors", "value": content.get("errors") or content.get("error")})
+        numeric_items = {key: value for key, value in content.items() if isinstance(value, (int, float))}
+        if numeric_items:
+            cards.append({"type": "metrics", "title": "Metrics", "value": numeric_items})
+        if content.get("files") or content.get("documents"):
+            cards.append({"type": "files", "title": "Files", "value": content.get("files") or content.get("documents")})
+    if mode in {"json", "auto"}:
+        cards.append({"type": "json", "title": "JSON", "value": content})
+    return cards
+
+
+def build_debug_trace(payload_value: Any, payload_inputs: list[TypedPayload], trace_mode: str) -> dict[str, Any]:
+    input_types = [payload.data_type for payload in payload_inputs]
+    summary = summarize_preview_content(payload_value)
+    if trace_mode == "raw":
+        what_happened = f"Logger captured raw payload with {len(payload_inputs)} input(s)."
+    elif trace_mode == "failure_analysis":
+        what_happened = "Logger prepared failure analysis context for the incoming payload."
+    else:
+        what_happened = f"Logger captured {len(payload_inputs)} input(s): {preview_text(summary)}"
+    return {
+        "what_happened": what_happened,
+        "why_this_ran": "A connected upstream node produced data for the Logger payload input.",
+        "data_entered": {"input_count": len(payload_inputs), "input_types": input_types},
+        "data_exited": {"output_type": "log", "summary": summary},
+        "what_failed": payload_value.get("error") if isinstance(payload_value, dict) else None,
+    }
 
 
 def render_csv(rows: list[dict[str, Any]]) -> str:
@@ -1781,11 +2045,14 @@ def build_chatbot_messages(
     context_text: str,
     memory_text: str,
     answer_style: str = "conversational",
+    output_mode: str = "chat",
+    response_schema: str = "",
 ) -> list[LlmMessage]:
     system_sections = []
     if system_prompt.strip():
         system_sections.append(system_prompt.strip())
     system_sections.append(format_answer_style_instructions(answer_style))
+    system_sections.append(format_output_mode_instructions(output_mode, response_schema))
     if context_text.strip():
         system_sections.append(
             "Retrieved evidence:\n"
@@ -1819,6 +2086,20 @@ def format_answer_style_instructions(answer_style: str) -> str:
         ),
     }
     return styles.get(answer_style, styles["conversational"])
+
+
+def format_output_mode_instructions(output_mode: str, response_schema: str = "") -> str:
+    modes = {
+        "chat": "Output mode: chat answer. Return a natural answer for an end user.",
+        "markdown_report": "Output mode: markdown report. Use clear headings, bullets, and a short conclusion.",
+        "decision_memo": "Output mode: decision memo. Include decision, rationale, evidence, risks, and next actions.",
+        "table": "Output mode: table. Prefer a compact markdown table plus a one-sentence takeaway.",
+        "json_schema": (
+            "Output mode: JSON schema. Return valid JSON only, with no markdown fences. "
+            f"Schema to follow: {response_schema or '{\"answer\":\"string\",\"citations\":[],\"confidence\":0.0}'}"
+        ),
+    }
+    return modes.get(output_mode, modes["chat"])
 
 
 def render_chatbot_context(context_value: Any) -> str:

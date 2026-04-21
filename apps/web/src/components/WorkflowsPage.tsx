@@ -1,5 +1,21 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
+  Activity,
+  Blocks,
+  Boxes,
+  ChartNoAxesColumnIncreasing,
+  Database,
+  FileStack,
+  FolderOpen,
+  Layers3,
+  Rocket,
+  ShieldCheck,
+  Sparkles,
+  UserRound,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
+import {
   API_BASE_URL,
   addWorkflowPermission,
   archiveWorkflow,
@@ -67,6 +83,41 @@ type WorkflowsPageProps = {
 };
 
 type HomeView = "workflows" | "create" | "templates" | "usage" | "runs" | "publish" | "files" | "knowledge" | "components" | "marketplace" | "health" | "bundle" | "account";
+type NavIconName =
+  | "workflow"
+  | "spark"
+  | "template"
+  | "activity"
+  | "chart"
+  | "rocket"
+  | "folder"
+  | "database"
+  | "component"
+  | "blocks"
+  | "shield"
+  | "bundle"
+  | "user";
+
+function NavIcon({ name, className = "h-4 w-4" }: { name: NavIconName; className?: string }) {
+  const icons: Record<NavIconName, LucideIcon> = {
+    workflow: Workflow,
+    spark: Sparkles,
+    template: Layers3,
+    activity: Activity,
+    chart: ChartNoAxesColumnIncreasing,
+    rocket: Rocket,
+    folder: FolderOpen,
+    database: Database,
+    component: Boxes,
+    blocks: Blocks,
+    shield: ShieldCheck,
+    bundle: FileStack,
+    user: UserRound,
+  };
+  const Icon = icons[name];
+
+  return <Icon className={className} aria-hidden strokeWidth={1.9} />;
+}
 
 export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflowApp, onOpenChat, onOpenFiles }: WorkflowsPageProps) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -516,21 +567,23 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     return `${window.location.origin}/app/${workflowId}`;
   }
 
-  const navItems: Array<{ id: HomeView; label: string; short: string; detail: string }> = [
-    { id: "workflows", label: "Workflows", short: "WF", detail: `${workflows.length} saved` },
-    { id: "create", label: "Create", short: "CR", detail: "wizard" },
-    { id: "templates", label: "Templates", short: "TP", detail: `${templates.length} recipes` },
-    { id: "usage", label: "Usage", short: "US", detail: `${usage?.totals.runs || 0} runs` },
-    { id: "runs", label: "Runs", short: "RN", detail: `${recentRuns.length} recent` },
-    { id: "publish", label: "Publish", short: "PB", detail: `${publishedChatbots.length} live` },
-    { id: "files", label: "Files", short: "FL", detail: `${fileLibrary.length} uploads` },
-    { id: "knowledge", label: "Knowledge", short: "KG", detail: `${globalKnowledge.length} collections` },
-    { id: "components", label: "Components", short: "CP", detail: `${allSubflows.length} saved` },
-    { id: "marketplace", label: "Blocks", short: "BX", detail: `${marketplaceBlocks.length} blocks` },
-    { id: "health", label: "Health", short: "HL", detail: systemHealth ? "checked" : "setup" },
-    { id: "bundle", label: "Bundles", short: "BD", detail: "import/export" },
-    { id: "account", label: "Account", short: "AC", detail: currentUser ? currentUser.role : "login" },
+  const navItems: Array<{ id: HomeView; label: string; short: string; detail: string; group: string; tone: string; icon: NavIconName }> = [
+    { id: "workflows", label: "Workflows", short: "WF", detail: `${workflows.length} saved`, group: "Operate", tone: "from-lime/90 to-lime/45", icon: "workflow" },
+    { id: "create", label: "Create", short: "CR", detail: "wizard", group: "Operate", tone: "from-sand to-lime/50", icon: "spark" },
+    { id: "templates", label: "Templates", short: "TP", detail: `${templates.length} recipes`, group: "Operate", tone: "from-coral/60 to-sand", icon: "template" },
+    { id: "runs", label: "Runs", short: "RN", detail: `${recentRuns.length} recent`, group: "Observe", tone: "from-mist to-lime/50", icon: "activity" },
+    { id: "usage", label: "Usage", short: "US", detail: `${usage?.totals.runs || 0} runs`, group: "Observe", tone: "from-lime/70 to-white/70", icon: "chart" },
+    { id: "publish", label: "Publish", short: "PB", detail: `${publishedChatbots.length} live`, group: "Ship", tone: "from-coral/50 to-lime/60", icon: "rocket" },
+    { id: "files", label: "Files", short: "FL", detail: `${fileLibrary.length} uploads`, group: "Data", tone: "from-sand to-white/70", icon: "folder" },
+    { id: "knowledge", label: "Knowledge", short: "KG", detail: `${globalKnowledge.length} collections`, group: "Data", tone: "from-lime/75 to-mist", icon: "database" },
+    { id: "components", label: "Components", short: "CP", detail: `${allSubflows.length} saved`, group: "Build", tone: "from-white/80 to-mist", icon: "component" },
+    { id: "marketplace", label: "Blocks", short: "BX", detail: `${marketplaceBlocks.length} blocks`, group: "Build", tone: "from-lime/60 to-sand", icon: "blocks" },
+    { id: "bundle", label: "Bundles", short: "BD", detail: "import/export", group: "Build", tone: "from-sand to-coral/30", icon: "bundle" },
+    { id: "health", label: "Health", short: "HL", detail: systemHealth ? "checked" : "setup", group: "System", tone: "from-mist to-white/80", icon: "shield" },
+    { id: "account", label: "Account", short: "AC", detail: currentUser ? currentUser.role : "login", group: "System", tone: "from-white/80 to-lime/50", icon: "user" },
   ];
+  const navGroups = ["Operate", "Observe", "Ship", "Data", "Build", "System"];
+  const activeNavItem = navItems.find((item) => item.id === activeView) || navItems[0];
   const activeTitle: Record<HomeView, string> = {
     workflows: "Operate your AI workflows",
     create: "Create a workflow workspace",
@@ -652,92 +705,184 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_12%_8%,_rgba(182,255,135,0.34),_transparent_24%),radial-gradient(circle_at_88%_14%,_rgba(255,143,112,0.18),_transparent_22%),radial-gradient(circle_at_bottom_right,_rgba(126,211,255,0.30),_transparent_26%),linear-gradient(135deg,_#f6fbf4_0%,_#f3eadc_48%,_#fffaf5_100%)] p-3 text-ink">
-      <div className="grid min-h-[calc(100vh-1.5rem)] gap-3 lg:grid-cols-[236px_minmax(0,1fr)]">
-        <aside className="rounded-[2rem] border border-white/70 bg-ink p-3 text-white shadow-panel">
-          <div className="flex h-full flex-row items-center gap-2 overflow-auto lg:flex-col lg:items-stretch">
-            <div className="hidden rounded-[1.5rem] bg-[linear-gradient(135deg,_rgba(255,255,255,0.16),_rgba(255,255,255,0.06))] p-4 lg:block">
-              <p className="text-xl font-black tracking-tight">AI Studio</p>
-              <p className="mt-2 text-xs leading-5 text-white/48">Local-first workflow command center.</p>
+      <div className="grid min-h-[calc(100vh-1.5rem)] gap-3 lg:grid-cols-[292px_minmax(0,1fr)]">
+        <aside className="relative overflow-hidden rounded-[2.4rem] border border-white/55 bg-white/18 p-2.5 text-white shadow-[0_30px_90px_rgba(7,16,15,0.24)] backdrop-blur-2xl">
+          <div className="absolute inset-0 bg-[linear-gradient(155deg,_rgba(5,14,13,0.94)_0%,_rgba(14,35,32,0.90)_46%,_rgba(48,65,58,0.82)_100%)]" />
+          <div className="absolute -left-20 top-10 h-44 w-44 rounded-full bg-lime/24 blur-3xl" />
+          <div className="absolute -right-24 top-1/3 h-52 w-52 rounded-full bg-coral/16 blur-3xl" />
+          <div className="absolute bottom-0 left-0 right-0 h-52 bg-[radial-gradient(circle_at_50%_100%,_rgba(255,255,255,0.14),_transparent_64%)]" />
+          <div className="relative flex h-full gap-3 overflow-x-auto lg:flex-col lg:overflow-hidden">
+            <div className="relative hidden overflow-hidden rounded-[2rem] border border-white/14 bg-white/[0.075] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] backdrop-blur-xl lg:block">
+              <div className="absolute -right-12 -top-12 h-32 w-32 rounded-full bg-lime/24 blur-2xl" />
+              <div className="absolute -bottom-14 left-8 h-28 w-28 rounded-full bg-coral/18 blur-2xl" />
+              <div className="absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-white/35 to-transparent" />
+              <div className="relative flex items-center gap-3">
+                <div className="relative grid h-12 w-12 place-items-center rounded-[1.35rem] bg-lime text-sm font-black text-ink shadow-[0_18px_40px_rgba(182,255,135,0.24)]">
+                  <span className="absolute inset-1 rounded-[1.05rem] border border-ink/10" />
+                  <NavIcon name="spark" className="relative h-5 w-5" />
+                </div>
+                <div>
+                  <p className="text-xl font-black tracking-tight">AI Studio</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-white/42">Local command</p>
+                </div>
+              </div>
+              <div className="relative mt-4 rounded-[1.35rem] border border-white/10 bg-black/10 px-3 py-2 text-[11px] font-semibold text-white/52">
+                Local-first automation cockpit with workflows, files, RAG, publish, and audit in one place.
+              </div>
+              <div className="relative mt-4 grid grid-cols-3 gap-2">
+                <div className="rounded-[1.15rem] border border-white/10 bg-white/[0.075] px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/40">Flows</p>
+                  <p className="mt-1 text-lg font-black">{workflows.length}</p>
+                </div>
+                <div className="rounded-[1.15rem] border border-white/10 bg-white/[0.075] px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/40">Runs</p>
+                  <p className="mt-1 text-lg font-black">{usage?.totals.runs || 0}</p>
+                </div>
+                <div className="rounded-[1.15rem] bg-lime/90 px-3 py-2 text-ink shadow-[0_14px_34px_rgba(182,255,135,0.18)]">
+                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-ink/45">Live</p>
+                  <p className="mt-1 text-lg font-black">{publishedChatbots.length}</p>
+                </div>
+              </div>
             </div>
-            <div className="flex flex-1 gap-2 lg:flex-col">
-              {navItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setActiveView(item.id)}
-                  className={`group min-w-36 rounded-[1.25rem] px-3 py-3 text-left transition lg:min-w-0 ${
-                    activeView === item.id ? "bg-lime text-ink shadow-lg shadow-lime/10" : "bg-white/7 text-white hover:bg-white/13"
-                  }`}
-                >
-                  <span className="flex items-center gap-2">
-                    <span className={`h-2 w-2 rounded-full ${activeView === item.id ? "bg-ink" : "bg-white/28"}`} />
-                    <span className="text-sm font-bold">{item.label}</span>
+
+            <div className="flex min-w-max flex-1 gap-2 lg:min-w-0 lg:flex-col lg:overflow-y-auto lg:pr-1.5">
+              {navGroups.map((group) => {
+                const groupItems = navItems.filter((item) => item.group === group);
+                if (!groupItems.length) return null;
+                return (
+                  <div key={group} className="flex gap-2 lg:block">
+                    <p className="hidden px-3 pb-2 pt-3 text-[10px] font-black uppercase tracking-[0.28em] text-white/34 lg:flex lg:items-center lg:gap-2">
+                      <span className="h-px flex-1 bg-white/10" />
+                      <span>{group}</span>
+                    </p>
+                    <div className="flex gap-2 lg:grid lg:gap-1.5">
+                      {groupItems.map((item) => {
+                        const isActive = activeView === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => setActiveView(item.id)}
+                            className={`group relative min-w-44 overflow-hidden rounded-[1.45rem] p-2.5 text-left transition duration-200 lg:min-w-0 ${
+                              isActive
+                                ? "bg-white/92 text-ink shadow-[0_18px_45px_rgba(0,0,0,0.18)]"
+                                : "bg-white/[0.065] text-white ring-1 ring-white/[0.075] backdrop-blur hover:bg-white/[0.12] hover:ring-white/20"
+                            }`}
+                          >
+                            <span className={`absolute inset-y-3 left-0 w-1 rounded-r-full ${isActive ? "bg-lime shadow-[0_0_18px_rgba(182,255,135,0.85)]" : "bg-white/10"}`} />
+                            <span className={`absolute inset-0 bg-gradient-to-r ${isActive ? "from-lime/12 via-transparent to-coral/8" : "from-white/[0.035] via-transparent to-transparent"} opacity-90`} />
+                            <span className="flex items-center gap-3 pl-1.5">
+                              <span
+                                className={`relative grid h-10 w-10 shrink-0 place-items-center rounded-[1.1rem] bg-gradient-to-br ring-1 transition ${
+                                  isActive ? `${item.tone} text-ink ring-ink/5 shadow-[0_12px_28px_rgba(7,16,15,0.12)]` : "from-white/14 to-white/5 text-white/66 ring-white/10 group-hover:text-white"
+                                }`}
+                              >
+                                <NavIcon name={item.icon} className="h-4.5 w-4.5" />
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center justify-between gap-2">
+                                  <span className="truncate text-sm font-black">{item.label}</span>
+                                  {isActive ? <span className="h-2 w-2 rounded-full bg-lime shadow-[0_0_14px_rgba(182,255,135,0.85)]" /> : null}
+                                </span>
+                                <span className={`mt-0.5 block truncate text-[11px] font-semibold ${isActive ? "text-ink/52" : "text-white/36"}`}>
+                                  {item.detail}
+                                </span>
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="hidden rounded-[1.75rem] border border-white/12 bg-white/[0.075] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur-xl lg:block">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-white/10 text-white ring-1 ring-white/10">
+                    <NavIcon name="user" className="h-4 w-4" />
                   </span>
-                  <span className={`mt-1 block text-xs ${activeView === item.id ? "text-ink/58" : "text-white/42"}`}>{item.detail}</span>
-                </button>
-              ))}
+                  <div className="min-w-0">
+                  <p className="truncate text-sm font-black">{currentUser ? currentUser.display_name : "Local operator"}</p>
+                  <p className="mt-0.5 text-xs font-semibold text-white/38">{currentUser ? currentUser.role : "Sign in to track ownership"}</p>
+                  </div>
+                </div>
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${systemHealth ? "bg-lime shadow-[0_0_16px_rgba(182,255,135,0.8)]" : "bg-sand"}`} />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  void refreshAll();
+                }}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-[1.2rem] bg-lime px-3 py-3 text-xs font-black uppercase tracking-[0.18em] text-ink shadow-[0_16px_34px_rgba(182,255,135,0.18)] transition hover:brightness-95"
+              >
+                <NavIcon name="activity" className="h-4 w-4" />
+                Sync Studio
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                void refreshAll();
-              }}
-              className="rounded-[1.25rem] bg-white/10 px-3 py-3 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white/16"
-            >
-              Sync Data
-            </button>
           </div>
         </aside>
 
-        <div className="min-w-0 overflow-hidden rounded-[2rem] border border-white/70 bg-white/48 shadow-panel backdrop-blur">
+        <div className="min-w-0 overflow-hidden rounded-[2.2rem] border border-white/70 bg-white/52 shadow-[0_30px_90px_rgba(47,60,50,0.14)] backdrop-blur-2xl">
           <div className="mx-auto max-w-7xl p-4 lg:p-6">
-        <header className="overflow-hidden rounded-[2rem] border border-white/70 bg-[linear-gradient(135deg,_#081018_0%,_#17302e_58%,_#31413b_100%)] p-5 text-white shadow-panel lg:flex lg:items-end lg:justify-between">
-          <div className="relative">
-            <div className="absolute -left-16 -top-20 h-40 w-40 rounded-full bg-lime/20 blur-3xl" />
-            <p className="relative mb-3 text-xs font-semibold uppercase tracking-[0.35em] text-white/45">
-              AI Studio
-            </p>
-            <h1 className="relative max-w-3xl text-3xl font-bold tracking-tight sm:text-5xl">
-              {activeTitle[activeView]}
-            </h1>
-            <p className="relative mt-3 max-w-2xl text-sm leading-6 text-white/64">
-              {activeSubtitle[activeView]}
-            </p>
-            <div className="relative mt-4 flex flex-wrap gap-2">
-              <span className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/70">
-                {statusMessage}
-              </span>
-              <span className="rounded-full bg-lime/20 px-3 py-1.5 text-xs font-semibold text-lime">
-                {currentUser ? `Owner: ${currentUser.display_name}` : "Login recommended"}
-              </span>
-            </div>
-          </div>
-          <div className="relative mt-5 flex flex-wrap gap-2 lg:mt-0 lg:justify-end">
-            <button
-              type="button"
-              onClick={() => {
-                void refreshAll();
-              }}
-              className="rounded-full bg-white/12 px-4 py-2 text-sm font-semibold text-white ring-1 ring-white/10 transition hover:bg-white/18"
-            >
-              Sync
-            </button>
-            <button
-              type="button"
-              onClick={onOpenFiles}
-              className="rounded-full bg-white/12 px-4 py-2 text-sm font-semibold text-white ring-1 ring-white/10 transition hover:bg-white/18"
-            >
-              Files
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveView("create")}
-              className="rounded-full bg-lime px-4 py-2 text-sm font-bold text-ink transition hover:brightness-95"
-            >
-              Create
-            </button>
-          </div>
-        </header>
+            <header className="relative overflow-hidden rounded-[2.15rem] border border-white/72 bg-[linear-gradient(135deg,_rgba(8,16,24,0.96)_0%,_rgba(23,48,46,0.94)_58%,_rgba(49,65,59,0.88)_100%)] p-5 text-white shadow-[0_28px_80px_rgba(7,16,15,0.22)] backdrop-blur-2xl lg:flex lg:items-end lg:justify-between">
+              <div className="absolute -left-16 -top-20 h-44 w-44 rounded-full bg-lime/24 blur-3xl" />
+              <div className="absolute right-12 top-4 h-32 w-32 rounded-full bg-mist/20 blur-3xl" />
+              <div className="absolute -bottom-16 right-1/3 h-36 w-36 rounded-full bg-coral/12 blur-3xl" />
+              <div className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-white/45 to-transparent" />
+              <div className="relative">
+                <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/10 px-3 py-1.5 text-xs font-black uppercase tracking-[0.24em] text-white/62 backdrop-blur">
+                  <span className={`grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br ${activeNavItem.tone} text-ink`}>
+                    <NavIcon name={activeNavItem.icon} className="h-3.5 w-3.5" />
+                  </span>
+                  AI Studio / {activeNavItem.label}
+                </div>
+                <h1 className="relative max-w-3xl text-3xl font-black tracking-tight sm:text-5xl">
+                  {activeTitle[activeView]}
+                </h1>
+                <p className="relative mt-3 max-w-2xl text-sm leading-6 text-white/66">
+                  {activeSubtitle[activeView]}
+                </p>
+                <div className="relative mt-4 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/72 backdrop-blur">
+                    {statusMessage}
+                  </span>
+                  <span className="rounded-full border border-lime/20 bg-lime/18 px-3 py-1.5 text-xs font-bold text-lime backdrop-blur">
+                    {currentUser ? `Owner: ${currentUser.display_name}` : "Login recommended"}
+                  </span>
+                </div>
+              </div>
+              <div className="relative mt-5 flex flex-wrap gap-2 lg:mt-0 lg:justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void refreshAll();
+                  }}
+                  className="inline-flex items-center gap-2 rounded-full bg-white/12 px-4 py-2 text-sm font-bold text-white ring-1 ring-white/12 backdrop-blur transition hover:bg-white/18"
+                >
+                  <NavIcon name="activity" className="h-4 w-4" />
+                  Sync
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenFiles}
+                  className="inline-flex items-center gap-2 rounded-full bg-white/12 px-4 py-2 text-sm font-bold text-white ring-1 ring-white/12 backdrop-blur transition hover:bg-white/18"
+                >
+                  <NavIcon name="folder" className="h-4 w-4" />
+                  Files
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveView("create")}
+                  className="inline-flex items-center gap-2 rounded-full bg-lime px-4 py-2 text-sm font-black text-ink shadow-[0_16px_34px_rgba(182,255,135,0.18)] transition hover:brightness-95"
+                >
+                  <NavIcon name="spark" className="h-4 w-4" />
+                  Create
+                </button>
+              </div>
+            </header>
 
         {activeView === "create" ? (
           <section className="mt-6 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">

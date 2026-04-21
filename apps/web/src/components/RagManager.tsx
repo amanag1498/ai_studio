@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Database, RefreshCw, SearchCheck, ShieldCheck, Trash2 } from "lucide-react";
 import {
   deleteKnowledgeCollection,
   evaluateKnowledgeCollection,
@@ -122,10 +123,14 @@ export function RagManager({ workflowId }: RagManagerProps) {
     <div className="rounded-[1.4rem] bg-white p-4 ring-1 ring-ink/6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-sm font-semibold text-ink">RAG Manager</p>
+          <p className="flex items-center gap-2 text-sm font-semibold text-ink">
+            <Database className="h-4 w-4 text-lime" aria-hidden />
+            RAG Manager
+          </p>
           <p className="mt-1 text-xs leading-5 text-ink/55">{status}</p>
         </div>
-        <button type="button" onClick={() => void refreshCollections()} className="rounded-full bg-mist px-3 py-2 text-xs font-semibold">
+        <button type="button" onClick={() => void refreshCollections()} className="inline-flex items-center gap-1.5 rounded-full bg-mist px-3 py-2 text-xs font-semibold">
+          <RefreshCw className="h-3.5 w-3.5" aria-hidden />
           Refresh
         </button>
       </div>
@@ -145,7 +150,8 @@ export function RagManager({ workflowId }: RagManagerProps) {
 
       <div className="mt-3 flex gap-2">
         <input value={query} onChange={(event) => setQuery(event.target.value)} className="min-w-0 flex-1 rounded-2xl border border-ink/10 px-3 py-2 text-sm" />
-        <button type="button" onClick={() => void runRetrievalTest()} className="rounded-2xl bg-ink px-3 py-2 text-sm font-semibold text-white">
+        <button type="button" onClick={() => void runRetrievalTest()} className="inline-flex items-center gap-1.5 rounded-2xl bg-ink px-3 py-2 text-sm font-semibold text-white">
+          <SearchCheck className="h-4 w-4" aria-hidden />
           Test
         </button>
       </div>
@@ -164,7 +170,10 @@ export function RagManager({ workflowId }: RagManagerProps) {
       {diagnostics ? (
         <div className="mt-3 rounded-2xl bg-ink p-3 text-xs text-white">
           <div className="flex items-center justify-between">
-            <p className="font-semibold">Self-healing health</p>
+            <p className="flex items-center gap-2 font-semibold">
+              <ShieldCheck className="h-4 w-4" aria-hidden />
+              Self-healing health
+            </p>
             <span className="rounded-full bg-white/15 px-2 py-1">{diagnostics.health_score}/100</span>
           </div>
           <div className="mt-3 grid grid-cols-3 gap-2">
@@ -233,10 +242,12 @@ export function RagManager({ workflowId }: RagManagerProps) {
       ) : null}
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <button type="button" onClick={() => void reingestCollection()} disabled={!selectedCollection} className="rounded-2xl bg-lime/30 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+        <button type="button" onClick={() => void reingestCollection()} disabled={!selectedCollection} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-lime/30 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+          <RefreshCw className="h-4 w-4" aria-hidden />
           Re-ingest / Self-heal
         </button>
-        <button type="button" onClick={() => void removeCollection()} disabled={!selectedCollection} className="rounded-2xl border border-coral/30 bg-coral/10 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+        <button type="button" onClick={() => void removeCollection()} disabled={!selectedCollection} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-coral/30 bg-coral/10 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+          <Trash2 className="h-4 w-4" aria-hidden />
           Delete Collection
         </button>
       </div>

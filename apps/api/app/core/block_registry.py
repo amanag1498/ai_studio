@@ -47,8 +47,11 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         inputs=(),
         outputs=(BlockPortDefinition(id="file", data_types=("file",)), BlockPortDefinition(id="metadata", data_types=("json",))),
         fields=(
+            BlockFieldDefinition(key="sourceMode", required=False, allow_blank=False),
+            BlockFieldDefinition(key="libraryFileIds", required=False),
             BlockFieldDefinition(key="accept", required=True, allow_blank=False),
             BlockFieldDefinition(key="multiple", required=True),
+            BlockFieldDefinition(key="maxSizeMb", required=False),
             BlockFieldDefinition(key="defaultLocalPaths", required=False),
         ),
     ),
@@ -60,7 +63,7 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
             BlockPortDefinition(id="text", data_types=("text",)),
             BlockPortDefinition(id="metadata", data_types=("json",)),
         ),
-        fields=(BlockFieldDefinition(key="strategy", required=True, allow_blank=False),),
+        fields=(BlockFieldDefinition(key="strategy", required=True, allow_blank=False), BlockFieldDefinition(key="qualityReport", required=False)),
     ),
     "rag_knowledge": BlockDefinition(
         block_type="rag_knowledge",
@@ -79,6 +82,8 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
             BlockFieldDefinition(key="chunkSize", required=True),
             BlockFieldDefinition(key="overlap", required=True),
             BlockFieldDefinition(key="topK", required=True),
+            BlockFieldDefinition(key="retrievalStrategy", required=False, allow_blank=False),
+            BlockFieldDefinition(key="rerank", required=False),
             BlockFieldDefinition(key="tags", required=True),
             BlockFieldDefinition(key="allowedFileTypes", required=True, allow_blank=False),
         ),
@@ -92,11 +97,14 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         outputs=(
             BlockPortDefinition(id="reply", data_types=("chat", "text")),
             BlockPortDefinition(id="json", data_types=("json",)),
+            BlockPortDefinition(id="citations", data_types=("json", "knowledge")),
         ),
         fields=(
             BlockFieldDefinition(key="model", required=True, allow_blank=False),
             BlockFieldDefinition(key="systemPrompt", required=True, allow_blank=False),
             BlockFieldDefinition(key="answerStyle", required=False, allow_blank=False),
+            BlockFieldDefinition(key="outputMode", required=False, allow_blank=False),
+            BlockFieldDefinition(key="responseSchema", required=False),
             BlockFieldDefinition(key="temperature", required=True),
         ),
     ),
@@ -126,6 +134,7 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         outputs=(BlockPortDefinition(id="json", data_types=("json",)),),
         fields=(
             BlockFieldDefinition(key="model", required=True, allow_blank=False),
+            BlockFieldDefinition(key="schemaFields", required=False),
             BlockFieldDefinition(key="schemaPrompt", required=True, allow_blank=False),
             BlockFieldDefinition(key="strictMode", required=True),
         ),
@@ -319,7 +328,10 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
             BlockPortDefinition(id="right", data_types=("text", "chat", "json", "knowledge", "any")),
         ),
         outputs=(BlockPortDefinition(id="merged", data_types=("text", "json", "any")), BlockPortDefinition(id="json", data_types=("json",))),
-        fields=(BlockFieldDefinition(key="mode", required=True, allow_blank=False),),
+        fields=(
+            BlockFieldDefinition(key="mode", required=True, allow_blank=False),
+            BlockFieldDefinition(key="fieldPaths", required=False),
+        ),
     ),
     "condition": BlockDefinition(
         block_type="condition",
@@ -329,7 +341,10 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
             BlockPortDefinition(id="false", data_types=("any",)),
             BlockPortDefinition(id="evaluation", data_types=("json", "boolean")),
         ),
-        fields=(BlockFieldDefinition(key="expression", required=True, allow_blank=False),),
+        fields=(
+            BlockFieldDefinition(key="rules", required=False),
+            BlockFieldDefinition(key="expression", required=True, allow_blank=False),
+        ),
     ),
     "chat_output": BlockDefinition(
         block_type="chat_output",
@@ -347,13 +362,19 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         block_type="dashboard_preview",
         inputs=(BlockPortDefinition(id="content", data_types=("text", "json", "preview", "chat")),),
         outputs=(BlockPortDefinition(id="result", data_types=("preview", "json")),),
-        fields=(BlockFieldDefinition(key="view", required=True, allow_blank=False),),
+        fields=(
+            BlockFieldDefinition(key="view", required=True, allow_blank=False),
+            BlockFieldDefinition(key="cardLayout", required=False, allow_blank=False),
+        ),
     ),
     "logger": BlockDefinition(
         block_type="logger",
         inputs=(BlockPortDefinition(id="payload", data_types=("any", "text", "json", "chat")),),
         outputs=(BlockPortDefinition(id="log", data_types=("log",)),),
-        fields=(BlockFieldDefinition(key="level", required=True, allow_blank=False),),
+        fields=(
+            BlockFieldDefinition(key="traceMode", required=False, allow_blank=False),
+            BlockFieldDefinition(key="level", required=True, allow_blank=False),
+        ),
     ),
 }
 

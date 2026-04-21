@@ -31,6 +31,8 @@ class RagKnowledgeConfig:
     top_k: int
     tags: list[str]
     allowed_file_types: set[str]
+    retrieval_strategy: str = "hybrid"
+    rerank: bool = True
 
 
 def build_rag_config(config: dict[str, Any]) -> RagKnowledgeConfig:
@@ -55,15 +57,42 @@ def build_rag_config(config: dict[str, Any]) -> RagKnowledgeConfig:
         top_k=max(1, int(config.get("topK", 4))),
         tags=tags,
         allowed_file_types=allowed_file_types,
+        retrieval_strategy=str(config.get("retrievalStrategy", "hybrid")),
+        rerank=bool(config.get("rerank", True)),
     )
 
 
 def should_ingest_documents(rag_config: RagKnowledgeConfig) -> bool:
-    return rag_config.ingest_mode in {"ingest_only", "ingest_and_retrieve"}
+    return rag_config.ingest_mode in {"ingest_only", "ingest_and_retrieve", "refresh_collection"}
 
 
 def should_retrieve_chunks(rag_config: RagKnowledgeConfig) -> bool:
-    return rag_config.ingest_mode in {"retrieve_only", "ingest_and_retrieve"}
+    return rag_config.ingest_mode in {"retrieve_only", "ingest_and_retrieve", "refresh_collection"}
+
+
+def clear_collection_records(session: Session, *, workflow: Workflow, rag_config: RagKnowledgeConfig) -> dict[str, int]:
+    chunks = list(
+        session.scalars(
+            select(KnowledgeChunk).where(
+                KnowledgeChunk.workflow_id == workflow.id,
+                KnowledgeChunk.collection_name == rag_config.collection_name,
+            )
+        )
+    )
+    documents = list(
+        session.scalars(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.workflow_id == workflow.id,
+                KnowledgeDocument.collection_name == rag_config.collection_name,
+            )
+        )
+    )
+    for chunk in chunks:
+        session.delete(chunk)
+    for document in documents:
+        session.delete(document)
+    session.flush()
+    return {"chunks_deleted": len(chunks), "documents_deleted": len(documents)}
 
 
 def ingest_documents(
@@ -245,16 +274,27 @@ def retrieve_relevant_chunks(
     embedding_provider = embedding_provider or get_default_embedding_provider()
     vector_store = vector_store or get_default_vector_store()
 
-    query_embedding = embedding_provider.embed_texts([query])[0]
-    matches = query_vector_store(
-        vector_store=vector_store,
-        workflow=workflow,
-        rag_config=rag_config,
-        query_embedding=query_embedding,
-    )
-    retrieved = hydrate_vector_matches(session, workflow=workflow, rag_config=rag_config, matches=matches)
+    retrieved: list[RetrievedChunk] = []
+    if rag_config.retrieval_strategy in {"vector", "hybrid"}:
+        query_embedding = embedding_provider.embed_texts([query])[0]
+        matches = query_vector_store(
+            vector_store=vector_store,
+            workflow=workflow,
+            rag_config=rag_config,
+            query_embedding=query_embedding,
+        )
+        retrieved = hydrate_vector_matches(session, workflow=workflow, rag_config=rag_config, matches=matches)
+    if rag_config.retrieval_strategy == "keyword":
+        retrieved = lexical_fallback_search(session, workflow=workflow, rag_config=rag_config, query=query)
+    elif rag_config.retrieval_strategy == "hybrid":
+        retrieved = merge_retrieval_results(
+            retrieved,
+            lexical_fallback_search(session, workflow=workflow, rag_config=rag_config, query=query),
+            top_k=rag_config.top_k,
+            rerank=rag_config.rerank,
+        )
     if retrieved:
-        return retrieved
+        return rerank_retrieved_chunks(retrieved, rag_config) if rag_config.rerank else retrieved
 
     heal_summary = heal_vector_collection(
         session,
@@ -274,7 +314,8 @@ def retrieve_relevant_chunks(
         if retrieved:
             return retrieved
 
-    return lexical_fallback_search(session, workflow=workflow, rag_config=rag_config, query=query)
+    fallback = lexical_fallback_search(session, workflow=workflow, rag_config=rag_config, query=query)
+    return rerank_retrieved_chunks(fallback, rag_config) if rag_config.rerank else fallback
 
 
 def query_vector_store(
@@ -431,6 +472,33 @@ def lexical_fallback_search(
         )
         for score, chunk in scored[: rag_config.top_k]
     ]
+
+
+def merge_retrieval_results(
+    primary: list[RetrievedChunk],
+    secondary: list[RetrievedChunk],
+    *,
+    top_k: int,
+    rerank: bool,
+) -> list[RetrievedChunk]:
+    by_chunk_id: dict[int, RetrievedChunk] = {}
+    for item in primary + secondary:
+        existing = by_chunk_id.get(item.chunk_id)
+        if existing is None or retrieval_sort_key(item) < retrieval_sort_key(existing):
+            by_chunk_id[item.chunk_id] = item
+    merged = list(by_chunk_id.values())
+    if rerank:
+        merged = sorted(merged, key=retrieval_sort_key)
+    return merged[:top_k]
+
+
+def rerank_retrieved_chunks(chunks: list[RetrievedChunk], rag_config: RagKnowledgeConfig) -> list[RetrievedChunk]:
+    return sorted(chunks, key=retrieval_sort_key)[: rag_config.top_k]
+
+
+def retrieval_sort_key(chunk: RetrievedChunk) -> tuple[float, int]:
+    score = chunk.score if chunk.score is not None else 999.0
+    return (score, -len(chunk.text or ""))
 
 
 def filter_documents_for_ingestion(

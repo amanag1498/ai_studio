@@ -1,9 +1,24 @@
 import { Handle, Position, type NodeProps } from "reactflow";
+import { Bot, BrainCircuit, Database, FileInput, GitBranch, HardDrive, MessageSquare, Monitor, Settings2, type LucideIcon } from "lucide-react";
 import type { BuilderBlockData } from "@vmb/shared";
+
+function getBlockIcon(category: string): LucideIcon {
+  const icons: Record<string, LucideIcon> = {
+    Inputs: FileInput,
+    Knowledge: Database,
+    AI: BrainCircuit,
+    Logic: GitBranch,
+    Memory: HardDrive,
+    Outputs: Monitor,
+    System: Settings2,
+  };
+  return icons[category] || Bot;
+}
 
 export function BuilderBlockNode({ data }: NodeProps<BuilderBlockData>) {
   const hasInputs = data.inputs.length > 0;
   const hasOutputs = data.outputs.length > 0;
+  const Icon = getBlockIcon(data.category);
 
   return (
     <div className="relative min-w-[245px] rounded-[24px] border border-ink/10 bg-white/95 p-3 shadow-panel ring-1 ring-white/70 transition hover:-translate-y-0.5 hover:shadow-[0_24px_70px_rgba(8,16,24,0.16)]">
@@ -34,7 +49,7 @@ export function BuilderBlockNode({ data }: NodeProps<BuilderBlockData>) {
             className="grid h-9 w-9 place-items-center rounded-2xl text-[10px] font-bold tracking-[0.18em] text-white"
             style={{ backgroundColor: data.accentColor }}
           >
-            {data.icon}
+            <Icon className="h-4.5 w-4.5" aria-hidden strokeWidth={1.9} />
           </div>
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-ink/45">
