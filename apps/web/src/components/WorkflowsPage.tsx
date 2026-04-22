@@ -83,6 +83,17 @@ type WorkflowsPageProps = {
 };
 
 type HomeView = "workflows" | "create" | "templates" | "usage" | "runs" | "publish" | "files" | "knowledge" | "components" | "marketplace" | "health" | "bundle" | "account";
+type WorkflowLaunchKind = "pure_chat" | "rag_chat" | "file_rag_app" | "document_app" | "builder_app";
+type WorkflowAppProfile = {
+  kind: WorkflowLaunchKind;
+  label: string;
+  launchSurface: "/chat" | "/app" | "/builder";
+  publishMode: "Chatbot URL" | "Workflow App URL" | "Builder Only";
+  description: string;
+  capabilities: string[];
+  allowedOutputs: string[];
+  improvements: string[];
+};
 type NavIconName =
   | "workflow"
   | "spark"
@@ -121,7 +132,8 @@ function NavIcon({ name, className = "h-4 w-4" }: { name: NavIconName; className
 
 export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflowApp, onOpenChat, onOpenFiles }: WorkflowsPageProps) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
-  const [workflowKinds, setWorkflowKinds] = useState<Record<number, "chat" | "builder">>({});
+  const [workflowKinds, setWorkflowKinds] = useState<Record<number, WorkflowLaunchKind>>({});
+  const [workflowProfiles, setWorkflowProfiles] = useState<Record<number, WorkflowAppProfile>>({});
   const [usage, setUsage] = useState<UsageDashboard | null>(null);
   const [observability, setObservability] = useState<ObservabilityDashboard | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
@@ -155,6 +167,8 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   const [bundleImportText, setBundleImportText] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [appTypeFilter, setAppTypeFilter] = useState<"all" | WorkflowLaunchKind>("all");
+  const [complexityFilter, setComplexityFilter] = useState<"all" | "basic" | "advanced" | "custom">("all");
   const [editingWorkflowId, setEditingWorkflowId] = useState<number | null>(null);
   const [editingWorkflowName, setEditingWorkflowName] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
@@ -174,17 +188,26 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   }, [showArchived]);
 
   const filteredWorkflows = workflows.filter((workflow) => {
+    if (appTypeFilter !== "all" && workflowKinds[workflow.id] !== appTypeFilter) {
+      return false;
+    }
+    if (complexityFilter !== "all" && getWorkflowComplexity(workflow) !== complexityFilter) {
+      return false;
+    }
     const query = searchQuery.trim().toLowerCase();
     if (!query) {
       return true;
     }
+    const profile = workflowProfiles[workflow.id];
     return [
       workflow.name,
       workflow.description || "",
       workflow.status,
       workflow.published_slug || "",
       `#${workflow.id}`,
-      workflowKinds[workflow.id] || "",
+      getWorkflowKindLabel(workflowKinds[workflow.id]),
+      profile?.capabilities.join(" ") || "",
+      profile?.allowedOutputs.join(" ") || "",
     ]
       .join(" ")
       .toLowerCase()
@@ -201,13 +224,14 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
         records.map(async (record) => {
           try {
             const workflow = await getWorkflow(record.id);
-            return [record.id, isChatWorkflow(workflow.graph_json) ? "chat" : "builder"] as const;
+            return [record.id, analyzeWorkflowApp(workflow.graph_json)] as const;
           } catch {
-            return [record.id, "builder"] as const;
+            return [record.id, defaultWorkflowAppProfile("builder_app")] as const;
           }
         }),
       );
-      setWorkflowKinds(Object.fromEntries(classifiedEntries));
+      setWorkflowProfiles(Object.fromEntries(classifiedEntries));
+      setWorkflowKinds(Object.fromEntries(classifiedEntries.map(([id, profile]) => [id, profile.kind])));
       void refreshRunHistory(records);
       setStatusMessage(records.length ? `${records.length} workflow(s) found.` : "No workflows yet.");
     } catch (error) {
@@ -312,10 +336,12 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     try {
       setStatusMessage(`Publishing workflow ${workflowId}.`);
       const workflow = await getWorkflow(workflowId);
-      if (!isChatWorkflow(workflow.graph_json)) {
+      const launchKind = getWorkflowLaunchKind(workflow.graph_json);
+      if (!canPublishAsChat(launchKind)) {
         setStatusMessage(
-          "This is not a chat workflow. Open it in Builder and run it there to see document/JSON outputs.",
+          "This workflow needs the app runner because it requires files, forms, dashboards, or document outputs. Opening the app page instead.",
         );
+        onOpenWorkflowApp(workflowId);
         return;
       }
       const published = await publishWorkflow(workflowId);
@@ -567,6 +593,28 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     return `${window.location.origin}/app/${workflowId}`;
   }
 
+  function getPrimaryLaunchLabel(workflow: WorkflowSummary) {
+    const kind = workflowKinds[workflow.id] || "builder_app";
+    if (canPublishAsChat(kind) && workflow.published_slug) return "Open Chat";
+    if (canPublishAsChat(kind)) return "Publish Chat";
+    if (kind === "file_rag_app") return "Run RAG App";
+    if (kind === "document_app") return "Run Document App";
+    return "Run App";
+  }
+
+  function launchWorkflow(workflow: WorkflowSummary) {
+    const kind = workflowKinds[workflow.id] || "builder_app";
+    if (canPublishAsChat(kind) && workflow.published_slug) {
+      onOpenChat(workflow.published_slug);
+      return;
+    }
+    if (canPublishAsChat(kind)) {
+      void publishAndOpen(workflow.id);
+      return;
+    }
+    onOpenWorkflowApp(workflow.id);
+  }
+
   const navItems: Array<{ id: HomeView; label: string; short: string; detail: string; group: string; tone: string; icon: NavIconName }> = [
     { id: "workflows", label: "Workflows", short: "WF", detail: `${workflows.length} saved`, group: "Operate", tone: "from-lime/90 to-lime/45", icon: "workflow" },
     { id: "create", label: "Create", short: "CR", detail: "wizard", group: "Operate", tone: "from-sand to-lime/50", icon: "spark" },
@@ -652,6 +700,21 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
       tone: "bg-white",
     };
   }
+
+  const appTypeFilters: Array<{ id: "all" | WorkflowLaunchKind; label: string; detail: string }> = [
+    { id: "all", label: "All Apps", detail: `${workflows.length}` },
+    { id: "pure_chat", label: "Pure Chat", detail: String(workflows.filter((workflow) => workflowKinds[workflow.id] === "pure_chat").length) },
+    { id: "rag_chat", label: "RAG Chat", detail: String(workflows.filter((workflow) => workflowKinds[workflow.id] === "rag_chat").length) },
+    { id: "file_rag_app", label: "File RAG", detail: String(workflows.filter((workflow) => workflowKinds[workflow.id] === "file_rag_app").length) },
+    { id: "document_app", label: "Documents", detail: String(workflows.filter((workflow) => workflowKinds[workflow.id] === "document_app").length) },
+    { id: "builder_app", label: "Builder", detail: String(workflows.filter((workflow) => workflowKinds[workflow.id] === "builder_app").length) },
+  ];
+  const complexityFilters: Array<{ id: "all" | "basic" | "advanced" | "custom"; label: string; detail: string }> = [
+    { id: "all", label: "All Levels", detail: String(workflows.length) },
+    { id: "basic", label: "Basic", detail: String(workflows.filter((workflow) => getWorkflowComplexity(workflow) === "basic").length) },
+    { id: "advanced", label: "Advanced", detail: String(workflows.filter((workflow) => getWorkflowComplexity(workflow) === "advanced").length) },
+    { id: "custom", label: "Custom", detail: String(workflows.filter((workflow) => getWorkflowComplexity(workflow) === "custom").length) },
+  ];
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1281,7 +1344,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                   </div>
                 </div>
               ))}
-              {workflows.filter((workflow) => !workflow.is_published && workflowKinds[workflow.id] === "chat").slice(0, 4).map((workflow) => (
+              {workflows.filter((workflow) => !workflow.is_published && canPublishAsChat(workflowKinds[workflow.id])).slice(0, 4).map((workflow) => (
                 <div key={`candidate-${workflow.id}`} className="rounded-[1.5rem] border border-dashed border-ink/15 bg-mist/60 p-4">
                   <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink/42">Ready To Publish</p>
                   <h3 className="mt-2 text-lg font-semibold">{workflow.name}</h3>
@@ -1589,19 +1652,19 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
         ) : null}
 
         {activeView === "workflows" ? (
-        <section className="mt-6 rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel backdrop-blur">
-          <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <section className="mt-6 rounded-[2.2rem] border border-white/70 bg-white/76 p-4 shadow-[0_28px_80px_rgba(47,60,50,0.14)] backdrop-blur-2xl lg:p-5">
+          <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/42">Workflow Library</p>
-              <h2 className="mt-2 text-2xl font-bold">Production desk</h2>
-              <p className="mt-1 text-sm text-ink/62">Open the builder, launch an app URL, inspect health, or clean up archived work.</p>
+              <p className="text-xs font-black uppercase tracking-[0.3em] text-ink/42">Workflow Catalog</p>
+              <h2 className="mt-2 text-3xl font-black tracking-tight">Apps from basic to advanced</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-ink/62">Browse ready-to-run workflows by app type and complexity. Chat-safe workflows launch as chatbots; file and dashboard workflows launch as app URLs.</p>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:justify-end">
               <input
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Search workflows, status, slug..."
-                className="w-full rounded-full border border-ink/10 bg-white px-4 py-2.5 text-sm outline-none sm:w-72"
+                className="w-full rounded-full border border-ink/10 bg-white px-4 py-3 text-sm outline-none sm:w-80"
               />
               <span className="rounded-full bg-mist px-4 py-2 text-xs font-semibold uppercase tracking-[0.25em] text-ink/55">
                 {filteredWorkflows.length}/{workflows.length} shown
@@ -1614,6 +1677,40 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                 {showArchived ? "Hide Archived" : "Show Archived"}
               </button>
             </div>
+          </div>
+
+          <div className="mb-3 flex gap-2 overflow-x-auto rounded-[1.45rem] border border-white/70 bg-white/72 p-2 shadow-sm backdrop-blur">
+            {complexityFilters.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setComplexityFilter(item.id)}
+                className={`min-w-max rounded-[1.1rem] px-4 py-2.5 text-left transition ${
+                  complexityFilter === item.id ? "bg-lime text-ink shadow-lg shadow-lime/10" : "bg-white/70 text-ink ring-1 ring-ink/6 hover:bg-lime/20"
+                }`}
+              >
+                <span className="block text-sm font-black">{item.label}</span>
+                <span className="mt-0.5 block text-[11px] font-semibold text-ink/45">{item.detail} workflow(s)</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="mb-5 flex gap-2 overflow-x-auto rounded-[1.45rem] border border-white/70 bg-white/72 p-2 shadow-sm backdrop-blur">
+            {appTypeFilters.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setAppTypeFilter(item.id)}
+                className={`min-w-max rounded-[1.1rem] px-4 py-3 text-left transition ${
+                  appTypeFilter === item.id ? "bg-ink text-white shadow-lg shadow-ink/10" : "bg-white/70 text-ink ring-1 ring-ink/6 hover:bg-lime/20"
+                }`}
+              >
+                <span className="block text-sm font-black">{item.label}</span>
+                <span className={`mt-0.5 block text-[11px] font-semibold ${appTypeFilter === item.id ? "text-white/52" : "text-ink/45"}`}>
+                  {item.detail} workflow(s)
+                </span>
+              </button>
+            ))}
           </div>
 
           <div className="mb-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -1647,7 +1744,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                 />
                 <AttentionCard
                   title="Publishing"
-                  body={`${workflows.filter((workflow) => workflowKinds[workflow.id] === "chat" && !workflow.is_published).length} chat workflow(s) ready to publish`}
+                  body={`${workflows.filter((workflow) => canPublishAsChat(workflowKinds[workflow.id]) && !workflow.is_published).length} chat workflow(s) ready to publish`}
                   tone="bg-mist/80"
                 />
               </div>
@@ -1703,17 +1800,23 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
               </p>
             </div>
           ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className="grid gap-3 xl:grid-cols-3">
               {filteredWorkflows.map((workflow) => (
                 <article
                   key={workflow.id}
-                  className="rounded-[1.7rem] border border-ink/8 bg-[linear-gradient(180deg,_#ffffff_0%,_#fbfcf8_100%)] p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel"
+                  className="group rounded-[1.65rem] border border-ink/8 bg-[linear-gradient(180deg,_#ffffff_0%,_#fbfcf8_100%)] p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel"
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-ink/45">
-                        Workflow #{workflow.id}
-                      </p>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="rounded-full bg-mist px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/45">#{workflow.id}</span>
+                        <span className="rounded-full bg-lime/25 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/55">
+                          {getWorkflowComplexity(workflow)}
+                        </span>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/45 ring-1 ring-ink/6">
+                          {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).label}
+                        </span>
+                      </div>
                       {editingWorkflowId === workflow.id ? (
                         <form
                           onSubmit={(event) => {
@@ -1739,116 +1842,56 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                         <button
                           type="button"
                           onClick={() => startRename(workflow)}
-                          className="mt-2 block text-left text-xl font-semibold transition hover:text-ink/70"
+                          className="mt-3 line-clamp-2 block text-left text-lg font-black leading-6 transition hover:text-ink/70"
                           title="Click to rename"
                         >
                           {workflow.name}
                         </button>
                       )}
-                      <p className="mt-2 text-sm leading-6 text-ink/62">
+                      <p className="mt-2 line-clamp-2 text-sm leading-5 text-ink/58">
                         {workflow.description || "No description yet."}
                       </p>
                     </div>
                     <span
-                      className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                      className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${
                         workflow.is_published ? "bg-lime/40 text-ink" : "bg-mist text-ink/60"
                       }`}
                     >
-                      {workflow.is_published ? "Published" : workflow.workflow_type || workflow.status}
+                      {workflow.is_published ? "Live" : workflow.status}
                     </span>
                   </div>
 
-                  <div className="mt-4 grid gap-2 sm:grid-cols-[120px_1fr]">
-                    <div className={`rounded-2xl px-4 py-3 ${workflow.quality_score >= 75 ? "bg-lime/25" : workflow.quality_score >= 50 ? "bg-sand/60" : "bg-coral/15"}`}>
-                      <span className="block text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Quality</span>
-                      <strong className="mt-1 block text-2xl text-ink">{workflow.quality_score}%</strong>
+                  <div className="mt-4 grid grid-cols-3 gap-2">
+                    <div className={`rounded-2xl px-3 py-2 ${workflow.quality_score >= 75 ? "bg-lime/25" : workflow.quality_score >= 50 ? "bg-sand/60" : "bg-coral/15"}`}>
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">Quality</span>
+                      <strong className="mt-1 block text-lg text-ink">{workflow.quality_score}%</strong>
                     </div>
-                    <div className="rounded-2xl bg-white px-4 py-3 ring-1 ring-ink/6">
-                      <span className="block text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Last Output</span>
-                      <p className="mt-1 max-h-11 overflow-hidden text-sm leading-5 text-ink/62">
-                        {workflow.last_run_preview || "Run this workflow to see the latest output preview here."}
-                      </p>
+                    <div className="rounded-2xl bg-mist/70 px-3 py-2">
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">Runs</span>
+                      <strong className="mt-1 block text-lg text-ink">{workflow.run_count}</strong>
                     </div>
-                  </div>
-                  {workflow.quality_recommendations?.length ? (
-                    <div className="mt-3 rounded-2xl bg-sand/45 px-4 py-3">
-                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-ink/45">Next Best Fix</p>
-                      <p className="mt-1 text-sm leading-5 text-ink/66">{workflow.quality_recommendations[0]}</p>
-                    </div>
-                  ) : null}
-
-                  <div className="mt-5 grid gap-2 text-sm text-ink/60 sm:grid-cols-2">
-                    <div className="rounded-2xl bg-mist/70 px-4 py-3">
-                      Version {workflow.current_version}
-                    </div>
-                    <div className="rounded-2xl bg-mist/70 px-4 py-3">
-                      Updated {new Date(workflow.updated_at).toLocaleString()}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => workflow.last_run_id && onOpenWorkflow(workflow.id)}
-                      className={`rounded-2xl px-4 py-3 text-left ${workflow.last_run_status === "failed" ? "bg-coral/15 text-ink" : "bg-lime/20 text-ink"}`}
-                    >
-                      <span className="block text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Run Health</span>
-                      <span className="mt-1 block font-semibold">
-                        {workflow.run_count} runs · {workflow.last_run_status || "never run"}
-                      </span>
-                      {workflow.last_run_error ? (
-                        <span className="mt-1 block truncate text-xs text-ink/62">{workflow.last_run_error}</span>
-                      ) : null}
-                    </button>
-                    <div className="rounded-2xl bg-mist/70 px-4 py-3">
-                      <span className="block text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">RAG Health</span>
-                      <span className="mt-1 block font-semibold text-ink">
-                        {workflow.rag_document_count} docs · {workflow.rag_chunk_count} chunks
-                      </span>
-                      <span className="mt-1 block text-xs text-ink/55">
-                        {workflow.rag_last_ingested_at ? `Last ingest ${new Date(workflow.rag_last_ingested_at).toLocaleDateString()}` : "No indexed knowledge yet"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void testRagHealth(workflow)}
-                        disabled={workflow.rag_chunk_count === 0}
-                        className="mt-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-45"
-                      >
-                        Test Retrieval
-                      </button>
+                    <div className="rounded-2xl bg-mist/70 px-3 py-2">
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">RAG</span>
+                      <strong className="mt-1 block text-lg text-ink">{workflow.rag_chunk_count}</strong>
                     </div>
                   </div>
 
-                  <div className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
-                    <div className="rounded-2xl bg-white px-4 py-3 ring-1 ring-ink/6">
-                      Avg latency: <strong>{workflow.avg_latency_ms ? `${workflow.avg_latency_ms}ms` : "n/a"}</strong>
-                    </div>
-                    <div className="rounded-2xl bg-white px-4 py-3 ring-1 ring-ink/6">
-                      Failures: <strong>{workflow.failed_run_count}</strong>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void openVersions(workflow.id)}
-                      className="rounded-2xl bg-white px-4 py-3 text-left font-semibold ring-1 ring-ink/6"
-                    >
-                      Versions
-                    </button>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).capabilities.slice(0, 4).map((capability) => (
+                      <span key={capability} className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/58 ring-1 ring-ink/6">
+                        {capability}
+                      </span>
+                    ))}
                   </div>
-
-                  {workflow.published_slug && workflowKinds[workflow.id] === "chat" ? (
-                    <button
-                      type="button"
-                      onClick={() => onOpenChat(workflow.published_slug || "")}
-                      className="mt-4 w-full rounded-2xl bg-lime/30 px-4 py-3 text-left text-sm font-semibold text-ink"
-                    >
-                      Chat URL: {getChatUrl(workflow.published_slug)}
-                    </button>
-                  ) : null}
-
-                  {workflow.published_slug && workflowKinds[workflow.id] === "builder" ? (
-                    <div className="mt-4 rounded-2xl bg-sand/60 px-4 py-3 text-sm font-semibold text-ink/70">
-                      This workflow has a legacy chat slug, but its current graph is a builder/document run. Open Builder to run it and inspect outputs.
-                    </div>
-                  ) : null}
 
                   <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => launchWorkflow(workflow)}
+                      className="rounded-full bg-lime px-4 py-2 text-sm font-bold text-ink"
+                    >
+                      {getPrimaryLaunchLabel(workflow)}
+                    </button>
                     <button
                       type="button"
                       onClick={() => onOpenWorkflow(workflow.id)}
@@ -1858,26 +1901,56 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     </button>
                     <button
                       type="button"
-                      onClick={() => onOpenWorkflowApp(workflow.id)}
-                      className="rounded-full bg-lime px-4 py-2 text-sm font-semibold text-ink"
-                    >
-                      App URL
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => void copyText(getWorkflowAppUrl(workflow.id))}
                       className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
                     >
                       Copy App Link
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => publishAndOpen(workflow.id)}
-                      disabled={workflowKinds[workflow.id] === "builder"}
-                      className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {workflowKinds[workflow.id] === "builder" ? "Run in Builder" : "Publish Chat URL"}
-                    </button>
+                  </div>
+
+                  <details className="mt-3 rounded-[1.25rem] bg-mist/55 px-3 py-2">
+                    <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.2em] text-ink/48">
+                      Details and admin
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">
+                        <p className="text-[10px] font-black uppercase tracking-[0.22em] text-ink/40">App routing</p>
+                        <p className="mt-1 text-sm font-semibold text-ink">
+                          Launch {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).launchSurface} · {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).publishMode}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-ink/55">
+                          {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).description}
+                        </p>
+                      </div>
+                      <div className="grid gap-2 text-sm sm:grid-cols-2">
+                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">Version {workflow.current_version}</div>
+                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">Avg latency {workflow.avg_latency_ms ? `${workflow.avg_latency_ms}ms` : "n/a"}</div>
+                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">Failures {workflow.failed_run_count}</div>
+                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">{workflow.rag_document_count} docs · {workflow.rag_chunk_count} chunks</div>
+                      </div>
+                      {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).improvements.length ? (
+                        <p className="rounded-2xl bg-sand/50 px-3 py-2 text-xs font-semibold leading-5 text-ink/66">
+                          {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).improvements[0]}
+                        </p>
+                      ) : null}
+                      {workflow.last_run_preview ? (
+                        <p className="rounded-2xl bg-white px-3 py-2 text-xs leading-5 text-ink/58 ring-1 ring-ink/6">{workflow.last_run_preview}</p>
+                      ) : null}
+                      {workflow.published_slug && canPublishAsChat(workflowKinds[workflow.id]) ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpenChat(workflow.published_slug || "")}
+                          className="w-full rounded-2xl bg-lime/30 px-3 py-2 text-left text-xs font-semibold text-ink"
+                        >
+                          Chat URL: {getChatUrl(workflow.published_slug)}
+                        </button>
+                      ) : null}
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" onClick={() => onOpenWorkflowApp(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">App URL</button>
+                        <button type="button" onClick={() => publishAndOpen(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">{canPublishAsChat(workflowKinds[workflow.id]) ? "Publish Chat" : "Open App"}</button>
+                        <button type="button" onClick={() => void openVersions(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">Versions</button>
+                        <button type="button" onClick={() => void testRagHealth(workflow)} disabled={workflow.rag_chunk_count === 0} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-45">Test RAG</button>
+                        <button type="button" onClick={() => void lifecycleAction("duplicate", workflow)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">Duplicate</button>
                     {workflow.last_run_id ? (
                       <button
                         type="button"
@@ -1885,36 +1958,29 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                           window.history.pushState({}, "", `/runs/${workflow.id}/${workflow.last_run_id}`);
                           window.dispatchEvent(new Event("vmb:navigate"));
                         }}
-                        className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
+                            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink"
                       >
                         Latest Run
                       </button>
                     ) : null}
                     <button
                       type="button"
-                      onClick={() => void lifecycleAction("duplicate", workflow)}
-                      className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
-                    >
-                      Duplicate
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => void openPermissions(workflow)}
-                      className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
+                            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink"
                     >
                       Permissions
                     </button>
                     <button
                       type="button"
                       onClick={() => void openCollaboration(workflow)}
-                      className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
+                            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink"
                     >
                       Activity
                     </button>
                     <button
                       type="button"
                       onClick={() => void downloadBundle(workflow)}
-                      className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
+                            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink"
                     >
                       Export
                     </button>
@@ -1922,7 +1988,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                       <button
                         type="button"
                         onClick={() => void lifecycleAction("restore", workflow)}
-                        className="rounded-full bg-lime/30 px-4 py-2 text-sm font-semibold text-ink"
+                              className="rounded-full bg-lime/30 px-3 py-1.5 text-xs font-semibold text-ink"
                       >
                         Restore
                       </button>
@@ -1930,7 +1996,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                       <button
                         type="button"
                         onClick={() => void lifecycleAction("archive", workflow)}
-                        className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink"
+                              className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink"
                       >
                         Archive
                       </button>
@@ -1938,14 +2004,16 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     <button
                       type="button"
                       onClick={() => void lifecycleAction("delete", workflow)}
-                      className="rounded-full bg-coral/15 px-4 py-2 text-sm font-semibold text-ink"
+                          className="rounded-full bg-coral/15 px-3 py-1.5 text-xs font-semibold text-ink"
                     >
                       Delete
                     </button>
-                    <span className="rounded-full bg-mist px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-ink/50">
+                        <span className="rounded-full bg-mist px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-ink/50">
                       Shareable: /app/{workflow.id}
                     </span>
-                  </div>
+                      </div>
+                    </div>
+                  </details>
                 </article>
               ))}
             </div>
@@ -2295,11 +2363,144 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   );
 }
 
-function isChatWorkflow(graph: BuilderGraph) {
-  return (
-    graph.nodes.some((node) => node.data.blockType === "chat_input") &&
-    graph.nodes.some((node) => node.data.blockType === "chat_output")
-  );
+function getWorkflowLaunchKind(graph: BuilderGraph): WorkflowLaunchKind {
+  return analyzeWorkflowApp(graph).kind;
+}
+
+function analyzeWorkflowApp(graph: BuilderGraph): WorkflowAppProfile {
+  const blockTypes = new Set(graph.nodes.map((node) => node.data.blockType));
+  const hasChatSurface = blockTypes.has("chat_input") && blockTypes.has("chat_output");
+  const hasFileInput = blockTypes.has("file_upload");
+  const hasDocumentOutput =
+    blockTypes.has("text_extraction") ||
+    blockTypes.has("dashboard_preview") ||
+    blockTypes.has("json_output") ||
+    blockTypes.has("form_input") ||
+    blockTypes.has("approval_step");
+  const hasRag = blockTypes.has("rag_knowledge");
+
+  let kind: WorkflowLaunchKind = "builder_app";
+  if (hasFileInput && hasRag && hasChatSurface) kind = "file_rag_app";
+  else if (hasFileInput || hasDocumentOutput) kind = "document_app";
+  else if (hasRag && hasChatSurface) kind = "rag_chat";
+  else if (hasChatSurface) kind = "pure_chat";
+
+  const profile = defaultWorkflowAppProfile(kind);
+  const capabilities = new Set(profile.capabilities);
+  const outputs = new Set(profile.allowedOutputs);
+  const improvements = new Set(profile.improvements);
+
+  if (hasChatSurface) capabilities.add("Conversational UI");
+  if (hasFileInput) capabilities.add("Runtime file upload");
+  if (blockTypes.has("text_extraction")) capabilities.add("Text extraction");
+  if (hasRag) capabilities.add("RAG retrieval");
+  if (blockTypes.has("conversation_memory")) capabilities.add("Session memory");
+  if (blockTypes.has("long_term_memory")) capabilities.add("Long-term memory");
+  if (blockTypes.has("query_rewriter")) capabilities.add("Query rewriting");
+  if (blockTypes.has("re_ranker")) capabilities.add("Re-ranking");
+  if (blockTypes.has("citation_verifier")) capabilities.add("Citation verification");
+  if (blockTypes.has("guardrail")) capabilities.add("Guardrails");
+  if (blockTypes.has("approval_step")) capabilities.add("Human approval");
+  if (blockTypes.has("web_search")) capabilities.add("Web research placeholder");
+  if (blockTypes.has("database_writer")) capabilities.add("Database write payload");
+  if (blockTypes.has("csv_excel_export")) capabilities.add("CSV export");
+  if (blockTypes.has("dashboard_preview")) outputs.add("Dashboard preview");
+  if (blockTypes.has("json_output")) outputs.add("Structured JSON");
+  if (blockTypes.has("chat_output")) outputs.add("Chat answer");
+  if (blockTypes.has("logger")) outputs.add("Debug trace");
+
+  if (hasRag && !blockTypes.has("re_ranker")) improvements.add("Add a Re-ranker block to improve source relevance before the chatbot.");
+  if (hasRag && !blockTypes.has("citation_verifier")) improvements.add("Add Citation Verifier so answers clearly show supported and unsupported claims.");
+  if (hasFileInput && !blockTypes.has("text_extraction")) improvements.add("Connect File Upload to Text Extraction so uploaded documents become usable text.");
+  if (hasChatSurface && !blockTypes.has("conversation_memory")) improvements.add("Add Conversation Memory if the app should remember previous turns.");
+  if (!blockTypes.has("logger")) improvements.add("Add Logger for user-friendly debugging and node-by-node traces.");
+  if ((hasFileInput || hasRag) && !blockTypes.has("dashboard_preview")) improvements.add("Add Dashboard/Preview to show sources, file metadata, and intermediate results.");
+  if (kind === "pure_chat" && !blockTypes.has("guardrail")) improvements.add("Add Guardrail for safer public chatbot behavior.");
+
+  return {
+    ...profile,
+    capabilities: Array.from(capabilities),
+    allowedOutputs: Array.from(outputs),
+    improvements: Array.from(improvements).slice(0, 4),
+  };
+}
+
+function defaultWorkflowAppProfile(kind: WorkflowLaunchKind): WorkflowAppProfile {
+  const profiles: Record<WorkflowLaunchKind, WorkflowAppProfile> = {
+    pure_chat: {
+      kind: "pure_chat",
+      label: "Pure Chatbot",
+      launchSurface: "/chat",
+      publishMode: "Chatbot URL",
+      description: "Best for direct assistants that only need a message, memory, model, and chat response.",
+      capabilities: ["Chat input", "LLM response"],
+      allowedOutputs: ["Chat answer"],
+      improvements: ["Add Conversation Memory for multi-turn support if this chatbot should remember context."],
+    },
+    rag_chat: {
+      kind: "rag_chat",
+      label: "Pre-Ingested RAG Chatbot",
+      launchSurface: "/chat",
+      publishMode: "Chatbot URL",
+      description: "Best when knowledge has already been indexed and users only need to ask questions.",
+      capabilities: ["Knowledge retrieval", "Chat input", "Citations"],
+      allowedOutputs: ["Chat answer", "Citations"],
+      improvements: ["Add a RAG health check panel and test questions before sharing the chatbot."],
+    },
+    file_rag_app: {
+      kind: "file_rag_app",
+      label: "Runtime File RAG App",
+      launchSurface: "/app",
+      publishMode: "Workflow App URL",
+      description: "Best when every run may upload or select a new document before asking questions.",
+      capabilities: ["Runtime file upload", "Text extraction", "RAG ingestion", "Chat answer"],
+      allowedOutputs: ["Chat answer", "Citations", "Dashboard preview"],
+      improvements: ["Use refresh collection mode for one-file-at-a-time apps, or separate collection names for reusable knowledge bases."],
+    },
+    document_app: {
+      kind: "document_app",
+      label: "Document Processing App",
+      launchSurface: "/app",
+      publishMode: "Workflow App URL",
+      description: "Best for extraction, summarization, approvals, dashboards, JSON output, and file-based workflows.",
+      capabilities: ["Runtime inputs", "Document processing"],
+      allowedOutputs: ["Dashboard preview", "Structured JSON"],
+      improvements: ["Add JSON Output and Dashboard/Preview so non-technical users can inspect final results clearly."],
+    },
+    builder_app: {
+      kind: "builder_app",
+      label: "Builder Automation",
+      launchSurface: "/builder",
+      publishMode: "Builder Only",
+      description: "Best for internal automations, experiments, and workflows that need more configuration before sharing.",
+      capabilities: ["Composable workflow"],
+      allowedOutputs: ["Run logs"],
+      improvements: ["Add a clear input block and output block before publishing or sharing this workflow."],
+    },
+  };
+  return profiles[kind];
+}
+
+function canPublishAsChat(kind?: WorkflowLaunchKind) {
+  return kind === "pure_chat" || kind === "rag_chat";
+}
+
+function getWorkflowKindLabel(kind?: WorkflowLaunchKind) {
+  const labels: Record<WorkflowLaunchKind, string> = {
+    pure_chat: "pure chatbot",
+    rag_chat: "RAG chatbot",
+    file_rag_app: "file RAG app",
+    document_app: "document app",
+    builder_app: "builder app",
+  };
+  return kind ? labels[kind] : "";
+}
+
+function getWorkflowComplexity(workflow: WorkflowSummary): "basic" | "advanced" | "custom" {
+  const name = workflow.name.toLowerCase();
+  if (name.startsWith("basic:")) return "basic";
+  if (name.startsWith("advanced:")) return "advanced";
+  return "custom";
 }
 
 function MetricCard({ label, value, detail }: { label: string; value: string | number; detail: string }) {

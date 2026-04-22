@@ -1,5 +1,18 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Bot, Edit3, MessageSquareText, Play, UserRound, Workflow } from "lucide-react";
+import {
+  ArrowLeft,
+  Bot,
+  CheckCircle2,
+  Edit3,
+  FileText,
+  LayoutDashboard,
+  MessageSquareText,
+  Play,
+  Sparkles,
+  UploadCloud,
+  UserRound,
+  Workflow,
+} from "lucide-react";
 import {
   executeWorkflowAsync,
   getRunEventsUrl,
@@ -73,6 +86,7 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
     ["chat_input", "text_input", "file_upload"].includes(node.data.blockType),
   );
   const appKind = getWorkflowAppKind(workflow);
+  const appProfile = getWorkflowAppProfile(workflow);
   const outputCards = getOutputCards(run, workflow);
 
   function getInputState(nodeId: string) {
@@ -318,9 +332,12 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
   }
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_15%_10%,_rgba(182,255,135,0.38),_transparent_24%),radial-gradient(circle_at_90%_20%,_rgba(255,143,112,0.2),_transparent_22%),linear-gradient(135deg,_#f6fbf4_0%,_#fff7ec_100%)] px-4 py-6 text-ink lg:px-8">
-      <div className="mx-auto grid max-w-7xl gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
-        <aside className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_15%_10%,_rgba(182,255,135,0.36),_transparent_24%),radial-gradient(circle_at_90%_20%,_rgba(255,143,112,0.18),_transparent_22%),radial-gradient(circle_at_bottom_right,_rgba(126,211,255,0.24),_transparent_24%),linear-gradient(135deg,_#f6fbf4_0%,_#fff7ec_100%)] px-4 py-5 text-ink lg:px-7">
+      <div className="mx-auto grid max-w-[1500px] gap-5 xl:grid-cols-[410px_minmax(0,1fr)]">
+        <aside className="relative overflow-hidden rounded-[2.25rem] border border-white/70 bg-white/76 p-5 shadow-[0_28px_80px_rgba(47,60,50,0.15)] backdrop-blur-2xl">
+          <div className="absolute -right-14 -top-14 h-44 w-44 rounded-full bg-lime/35 blur-3xl" />
+          <div className="absolute -bottom-16 left-8 h-40 w-40 rounded-full bg-mist/70 blur-3xl" />
+          <div className="relative">
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={onBack} className="inline-flex items-center gap-2 rounded-full bg-mist px-4 py-2 text-sm font-semibold">
               <ArrowLeft className="h-4 w-4" aria-hidden />
@@ -333,15 +350,29 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
               </button>
             ) : null}
           </div>
-          <p className="mt-6 text-xs font-semibold uppercase tracking-[0.34em] text-ink/45">{appKind} App</p>
-          <h1 className="mt-2 flex items-center gap-3 text-4xl font-bold tracking-tight">
-            <Workflow className="h-9 w-9 text-lime" aria-hidden />
+          <div className="mt-7 inline-flex items-center gap-2 rounded-full border border-ink/8 bg-white/70 px-3 py-1.5 text-xs font-black uppercase tracking-[0.24em] text-ink/52">
+            <Sparkles className="h-3.5 w-3.5 text-lime" aria-hidden />
+            {appProfile.label}
+          </div>
+          <h1 className="mt-3 flex items-center gap-3 text-4xl font-black tracking-tight">
+            <span className="grid h-12 w-12 place-items-center rounded-[1.35rem] bg-ink text-lime shadow-[0_18px_40px_rgba(7,16,15,0.16)]">
+              <Workflow className="h-6 w-6" aria-hidden />
+            </span>
             {workflow?.name || `Workflow #${workflowId}`}
           </h1>
           <p className="mt-3 text-sm leading-6 text-ink/62">
-            {getWorkflowAppDescription(appKind, workflow?.description)}
+            {workflow?.description || appProfile.description}
           </p>
-          <p className="mt-4 rounded-[1.35rem] bg-mist/80 p-3 text-sm font-semibold text-ink/72">{status}</p>
+          <p className="mt-4 rounded-[1.35rem] border border-ink/8 bg-white/72 p-3 text-sm font-semibold text-ink/72">{status}</p>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {appProfile.stats.map((stat) => (
+              <div key={stat.label} className="rounded-[1.25rem] bg-ink px-3 py-3 text-white">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-white/38">{stat.label}</p>
+                <p className="mt-1 text-lg font-black">{stat.value}</p>
+              </div>
+            ))}
+          </div>
 
           <label className="mt-5 block">
             <span className="inline-flex items-center gap-2 text-sm font-semibold">
@@ -371,15 +402,30 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
               <input value={userId} onChange={(event) => setUserId(event.target.value)} className="mt-2 w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none" />
             </label>
           </div>
+          <div className="mt-5 rounded-[1.5rem] bg-white/72 p-4 ring-1 ring-ink/6">
+            <p className="text-xs font-black uppercase tracking-[0.24em] text-ink/42">This app supports</p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {appProfile.capabilities.map((capability) => (
+                <span key={capability} className="rounded-full bg-mist px-2.5 py-1 text-[11px] font-semibold text-ink/62">
+                  {capability}
+                </span>
+              ))}
+            </div>
+          </div>
+          </div>
         </aside>
 
         <section className="space-y-5">
-          <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+          <div className="rounded-[2.15rem] border border-white/70 bg-white/82 p-5 shadow-[0_24px_70px_rgba(47,60,50,0.12)] backdrop-blur-2xl">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Inputs</p>
-                <h2 className="mt-2 text-2xl font-bold">Run this workflow</h2>
+                <h2 className="mt-2 flex items-center gap-2 text-2xl font-black">
+                  <UploadCloud className="h-6 w-6 text-lime" aria-hidden />
+                  Run this workflow
+                </h2>
               </div>
+              <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => void runWorkflowApp()}
@@ -397,6 +443,7 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
               >
                 Run Sample Test
               </button>
+              </div>
             </div>
 
             <div className="mt-5 grid gap-4 lg:grid-cols-2">
@@ -419,11 +466,14 @@ export function WorkflowAppPage({ workflowId, onBack, onOpenRun, onOpenBuilder }
             <PreRunChecklist workflow={workflow} runtimeNodes={runtimeNodes} runtimeInputs={runtimeInputs} />
           </div>
 
-          <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+          <div className="rounded-[2.15rem] border border-white/70 bg-white/82 p-5 shadow-[0_24px_70px_rgba(47,60,50,0.12)] backdrop-blur-2xl">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Dashboard Output</p>
-                <h2 className="mt-2 text-2xl font-bold">Results</h2>
+                <h2 className="mt-2 flex items-center gap-2 text-2xl font-black">
+                  <LayoutDashboard className="h-6 w-6 text-lime" aria-hidden />
+                  Results
+                </h2>
               </div>
               {run ? (
                 <button type="button" onClick={() => onOpenRun(run)} className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
@@ -472,12 +522,18 @@ function RuntimeInputCard({
   libraryFiles: FileLibraryItem[];
   onUseLibraryFile: (file: FileLibraryItem) => void;
 }) {
+  const InputIcon = node.data.blockType === "file_upload" ? FileText : node.data.blockType === "chat_input" ? MessageSquareText : Workflow;
   return (
-    <article className="rounded-[1.5rem] border border-ink/8 bg-white p-4 shadow-sm">
+    <article className="rounded-[1.65rem] border border-ink/8 bg-[linear-gradient(180deg,_#ffffff_0%,_#fbfcf8_100%)] p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel">
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="flex items-start gap-3">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-ink text-lime">
+            <InputIcon className="h-5 w-5" aria-hidden />
+          </span>
+          <div>
           <p className="font-semibold">{node.data.label}</p>
           <p className="mt-1 text-xs uppercase tracking-[0.2em] text-ink/45">{node.data.blockType.split("_").join(" ")}</p>
+          </div>
         </div>
         <span className="rounded-full px-2 py-1 text-[10px] font-bold text-white" style={{ backgroundColor: node.data.accentColor }}>
           {node.data.icon}
@@ -486,16 +542,21 @@ function RuntimeInputCard({
 
       {node.data.blockType === "file_upload" ? (
         <div className="mt-4">
-          <input
-            type="file"
-            accept={String(node.data.config.accept || ".pdf,.docx,.txt,.csv,.json")}
-            multiple={Boolean(node.data.config.multiple)}
-            onChange={(event) => {
-              onFilesChange(event.target.files);
-              event.target.value = "";
-            }}
-            className="w-full rounded-2xl border border-dashed border-ink/20 bg-mist/60 px-4 py-4 text-sm file:mr-4 file:rounded-full file:border-0 file:bg-ink file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white"
-          />
+          <label className="block cursor-pointer rounded-[1.35rem] border border-dashed border-ink/18 bg-mist/60 px-4 py-5 text-center transition hover:bg-lime/20">
+            <UploadCloud className="mx-auto h-7 w-7 text-ink/45" aria-hidden />
+            <span className="mt-2 block text-sm font-bold text-ink">Upload runtime document</span>
+            <span className="mt-1 block text-xs text-ink/52">or select an existing file below</span>
+            <input
+              type="file"
+              accept={String(node.data.config.accept || ".pdf,.docx,.txt,.csv,.json")}
+              multiple={Boolean(node.data.config.multiple)}
+              onChange={(event) => {
+                onFilesChange(event.target.files);
+                event.target.value = "";
+              }}
+              className="sr-only"
+            />
+          </label>
           <p className="mt-2 text-xs text-ink/55">
             Accepted: {String(node.data.config.accept || ".pdf,.docx,.txt,.csv,.json")}
           </p>
@@ -580,7 +641,10 @@ function PreRunChecklist({
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {checklist.map((item) => (
           <div key={item.label} className="rounded-2xl bg-white/8 px-3 py-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/40">{item.label}</p>
+            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-white/40">
+              <CheckCircle2 className={`h-3.5 w-3.5 ${item.ok ? "text-lime" : "text-coral"}`} aria-hidden />
+              {item.label}
+            </p>
             <p className={`mt-1 text-sm font-semibold ${item.ok ? "text-lime" : "text-coral"}`}>{item.value}</p>
           </div>
         ))}
@@ -605,6 +669,60 @@ function getWorkflowAppDescription(kind: string, fallback?: string | null) {
   if (kind === "extractor") return "A file-to-JSON app for extracting structured fields from documents.";
   if (kind === "rag") return "A knowledge retrieval app for testing local collections and cited answers.";
   return "A shareable local app URL for text, file, dashboard, JSON, and agent workflows.";
+}
+
+function getWorkflowAppProfile(workflow: WorkflowRecord | null) {
+  const blockTypes = new Set((workflow?.graph_json.nodes || []).map((node) => node.data.blockType));
+  const hasFiles = blockTypes.has("file_upload");
+  const hasRag = blockTypes.has("rag_knowledge");
+  const hasChat = blockTypes.has("chat_input") && blockTypes.has("chat_output");
+  const hasExtraction = blockTypes.has("text_extraction") || blockTypes.has("extraction_ai");
+  const hasDashboard = blockTypes.has("dashboard_preview");
+  const hasJson = blockTypes.has("json_output");
+  const label =
+    hasFiles && hasRag && hasChat
+      ? "Runtime File RAG App"
+      : hasExtraction
+        ? "Document Intelligence App"
+        : hasChat
+          ? "Chat App"
+          : "Workflow App";
+  const description =
+    hasFiles && hasRag && hasChat
+      ? "Upload or select a document, ask a question, retrieve local evidence, and generate an answer with source cards."
+      : hasExtraction
+        ? "Run document extraction, summarization, structured JSON, dashboards, approvals, and export-style workflows."
+        : hasChat
+          ? "Run a session-aware app with chat input, model response, memory, and clean answer cards."
+          : "Run a local workflow with typed inputs, node logs, dashboard cards, and inspectable outputs.";
+  const capabilities = [
+    hasFiles ? "File upload" : null,
+    hasRag ? "RAG retrieval" : null,
+    hasChat ? "Chat answer" : null,
+    hasExtraction ? "Extraction" : null,
+    hasDashboard ? "Dashboard" : null,
+    hasJson ? "JSON output" : null,
+    blockTypes.has("logger") ? "Debug logs" : null,
+    blockTypes.has("approval_step") ? "Approval" : null,
+  ].filter((item): item is string => Boolean(item));
+
+  return {
+    label,
+    description,
+    capabilities: capabilities.length ? capabilities : ["Typed workflow run"],
+    stats: [
+      { label: "Blocks", value: String(workflow?.graph_json.nodes.length || 0) },
+      {
+        label: "Inputs",
+        value: String((workflow?.graph_json.nodes || []).filter((node) => ["chat_input", "text_input", "file_upload", "form_input"].includes(node.data.blockType)).length),
+      },
+      {
+        label: "Outputs",
+        value: String((workflow?.graph_json.nodes || []).filter((node) => ["chat_output", "json_output", "dashboard_preview", "logger"].includes(node.data.blockType)).length),
+      },
+      { label: "Mode", value: hasFiles ? "App" : hasChat ? "Chat" : "Run" },
+    ],
+  };
 }
 
 function ExecutionTimeline({

@@ -7,7 +7,8 @@ AI Studio is a local-first visual workflow builder for document, RAG, chatbot, e
 - Build workflows visually with React Flow, drag-and-drop blocks, compatible ports, node badges, config sheets, minimap, controls, auto-layout, search, copy/paste-style actions, and polished full-canvas builder UI.
 - Run workflows as shareable local app pages at `/app/:workflowId` with file upload forms, text/chat inputs, pre-run checklist, execution timeline, and user-friendly dashboard output cards.
 - Persist workflows, versions, normalized nodes/edges, graph JSON snapshots, runs, node runs, latency, errors, logs, files, documents, chunks, users, auth events, memory, and permissions in SQLite.
-- Upload and parse PDF, DOCX, TXT, CSV, and JSON files with parser abstractions ready for future OCR.
+- Upload and parse PDF, DOCX, TXT, CSV, and JSON files, with OCR available through the local parser abstraction when Tesseract is installed.
+- Local-first provider adapters for web search, page reading, OCR, SMTP email, webhook notifications, and safe database querying.
 - Ingest documents into RAG collections using chunking, local `sentence-transformers` embeddings, and ChromaDB vector storage.
 - Retrieve relevant chunks with source metadata, confidence/relevance scoring, chunk viewer support, source preview, collection deletion, and retrieval testing.
 - Execute MVP blocks through a DAG engine with topological ordering, typed payloads, per-node executors, workflow run logs, node run logs, errors, and previewable outputs.
@@ -15,7 +16,7 @@ AI Studio is a local-first visual workflow builder for document, RAG, chatbot, e
 - Publish chat workflows as local chatbot endpoints and test them through `/chat/:slug`.
 - Manage workflows from a premium AI Studio home shell with tabs for Workflows, Create, Templates, Usage, Runs, Publish, Files, Knowledge, Components, Blocks, Health, Bundles, and Account.
 - Track local users, signup/login activity, workflow ownership, run ownership, usage stats, audit logs, published endpoints, and workflow permissions.
-- Stream workflow execution updates through the async run queue and Server-Sent Events.
+- Stream workflow execution updates through the async run queue and Server-Sent Events, with queue monitoring, cancellation, durable SQLite run state, and configurable retries/backoff.
 - Upload documents into a global File Library before building/running workflows, then reuse those files in Builder and App Run file inputs.
 - Add workflow comments, inspect change history, and save reusable subflow/components from workflow Activity panels.
 - Export/import workflow bundles for review, sharing, or backup.
@@ -107,6 +108,21 @@ EMBEDDING_PROVIDER=sentence-transformers
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 EMBEDDING_ALLOW_DOWNLOAD=false
 VECTOR_BACKEND=chromadb
+
+WEB_SEARCH_PROVIDER=duckduckgo
+WEB_READER_MAX_BYTES=2000000
+OCR_PROVIDER=tesseract
+OCR_TESSERACT_CMD=tesseract
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_FROM_EMAIL=
+NOTIFICATION_PROVIDER=local
+NOTIFICATION_WEBHOOK_URL=
+DATABASE_QUERY_DEFAULT_URL=
+DATABASE_QUERY_ALLOW_WRITES=false
+EXECUTION_QUEUE_MAX_WORKERS=3
+EXECUTION_QUEUE_MAX_RETRIES=1
+EXECUTION_QUEUE_RETRY_BACKOFF_SECONDS=1.5
 ```
 
 Frontend env:
@@ -144,7 +160,8 @@ Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/aman
 
 | Block | What it does | Needs | Outputs |
 | --- | --- | --- | --- |
-| Text Extraction | Parses PDF, DOCX, TXT, CSV, and JSON into normalized document text. No OCR yet. Emits extraction quality metadata: parser, page/line/word counts, failed files, warnings, detected table hints, and preview snippets. | File Upload output and extraction strategy. | `document`, `text`, and `metadata`. |
+| Text Extraction | Parses PDF, DOCX, TXT, CSV, and JSON into normalized document text. Emits extraction quality metadata: parser, page/line/word counts, failed files, warnings, detected table hints, and preview snippets. OCR strategy can call the local OCR parser. | File Upload output and extraction strategy. | `document`, `text`, and `metadata`. |
+| OCR | Uses the parser abstraction with local Tesseract OCR for image-heavy files and OCR-capable PDFs when Tesseract supports them. | File input, optional OCR provider/language hints, local Tesseract installed. | `document`, `text`, and `metadata`. |
 | RAG Knowledge | Ingests documents, chunks text, embeds locally with sentence-transformers, stores in ChromaDB, and retrieves source chunks. Modes: Ingest Only, Retrieve Only, Ingest + Retrieve, Refresh Collection. Retrieval strategies: hybrid vector+keyword, vector only, keyword only. Built-in rerank can reorder source chunks. | Collection name, mode, chunk size, overlap, top-k, retrieval strategy, rerank toggle, tags, allowed file types. | `knowledge`, `matches`, and `diagnostics`. |
 | Document Splitter | Splits long text/documents into reviewable sections for loops, extraction, or exports. | Document/text input, split mode, max characters. | `sections`. |
 | Table Extractor | Extracts simple row/table-like content into JSON rows. | Document/text input and delimiter mode. | `tables` JSON. |
@@ -152,8 +169,8 @@ Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/aman
 | Re-ranker | Reorders retrieved chunks by score/content quality before answer generation. | Knowledge/matches input and top-k. | Re-ranked `knowledge`. |
 | Citation Verifier | Scores whether answer terms are supported by retrieved sources. | Answer plus knowledge/source JSON. | `verification` JSON with support score and unsupported terms. |
 | Citation Formatter | Converts citations/source chunks into readable text or JSON source lists. | Knowledge/chat/json sources. | `text` and `json`. |
-| Web Search | Local-first placeholder search adapter that prepares search-style knowledge results. It is designed for a live search provider later. | Query and provider label/top-k. | `results` knowledge/json. |
-| Web Page Reader | Local-first placeholder reader that normalizes a URL into a document payload. Live fetching is adapter-gated. | URL text and reader mode. | `document`. |
+| Web Search | Runs through a swappable provider interface. Default live adapter uses DuckDuckGo HTML search; local adapter remains available for offline/dev runs. Results are normalized with title, URL, snippet, provider/source, and rank. | Query, provider, top-k, timeout settings. | `results` knowledge/json. |
+| Web Page Reader | Fetches HTTP/HTTPS pages with timeout, content-type checks, byte limits, title/meta extraction, readable text extraction, and optional markdown formatting. | URL text and reader mode. | `document`. |
 
 ### AI Blocks
 
@@ -195,8 +212,8 @@ Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/aman
 | Dashboard/Preview | Builds user-friendly preview payloads. Modes include auto, markdown, table, JSON, summary card, metric cards, citations, file preview, and error panel. Emits configurable cards with summary, metrics, citations, files, errors, and JSON. | Content input, preview mode, card layout. | Preview `result`. |
 | Logger | Captures local debug traces. Friendly mode explains what happened, why it ran, data in/out, and what failed; raw/failure-analysis modes are also available. | Payload input, trace mode, log level. | `log`. |
 | CSV/Excel Export | Writes structured rows to a local CSV file under storage uploads/exports. | Data input and filename. | File/json metadata. |
-| Email Sender | Prepares an email provider payload. It does not send live email until a provider adapter is connected. | Content, recipient, subject. | Status JSON/text. |
-| Slack/Teams Notification | Prepares a team notification payload. It does not send live messages until a provider adapter is connected. | Content and channel. | Status JSON/text. |
+| Email Sender | Sends through the SMTP provider when configured, otherwise returns a skipped status with no secret leakage. Supports to/cc/bcc, subject, text body, optional HTML body, and structured delivery logs. | Content, recipient, subject, SMTP env. | Status JSON/text. |
+| Slack/Teams Notification | Delivers through webhook-style providers when configured, or captures a local in-app/run-log notification in dev. Works for Slack, Discord, Teams, and generic webhooks. | Content, channel/provider, optional webhook env. | Status JSON/text. |
 
 ### System And Safety
 
@@ -204,12 +221,14 @@ Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/aman
 | --- | --- | --- | --- |
 | HTTP Request | Prepares a safe external API request payload. Live request execution is disabled unless enabled/configured. | Body input, method, URL, enable flag. | Response JSON. |
 | Database Writer | Captures a row as local run evidence and returns a record-style payload. | Row input and table label. | `record`. |
+| Database Query | Executes controlled SQLite/Postgres-compatible SQL through SQLAlchemy. Read-only by default, parameterized execution supported, multi-statement/destructive SQL blocked unless admin-enabled. | Query input, connection URL/env, optional limit. | Rows/columns JSON. |
+| SQL Assistant | Introspects the configured database schema and produces a safe read-only starter query plan, with optional execution through Database Query. | Natural-language question and database connection. | SQL text and plan JSON. |
 | PII Redactor | Masks emails and phone numbers before AI/RAG/output steps. | Text/json/chat content and redaction toggles. | `redacted` text and stats JSON. |
 | Guardrail | Routes content to safe/blocked based on configured blocked terms. | Content input and blocked terms. | `safe` or `blocked`. |
 
 ### Phase 2/3 Scaffolds
 
-The block registry also includes placeholders/interfaces for OCR, Summarizer variants, Classifier variants, Intent Router, Web Search, Web Page Reader, Publish API, Error Handler, Re-ranker, Research Agent, SQL Assistant, Database Query, Email, Notification, Human Approval, Guardrail, Access Control, and Long-Term Memory expansion. Some of these already have local-safe MVP behavior; others are intentionally stubs with integration notes so future provider adapters can plug into the same graph engine.
+The block registry also includes placeholders/interfaces for Summarizer variants, Classifier variants, Intent Router, Publish API, Error Handler, Re-ranker, Research Agent, Human Approval, Guardrail, Access Control, and Long-Term Memory expansion. OCR, Web Search, Web Page Reader, SQL Assistant, Database Query, Email, and Notification now have first usable provider-backed implementations while preserving the same extension seams.
 
 ## What Each Workflow Needs To Run Well
 
@@ -218,7 +237,10 @@ The block registry also includes placeholders/interfaces for OCR, Summarizer var
 - Chatbot, Summarizer, Classifier, Extraction AI, and Retry/Fallback LLM need `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, and `OPENROUTER_MODEL` configured.
 - Local embeddings need `EMBEDDING_MODEL`; if `EMBEDDING_ALLOW_DOWNLOAD=false`, the model must already exist locally.
 - Dashboard/Preview and Logger are best connected near the end of workflows and also to intermediate nodes when debugging.
-- Email, Slack/Teams, HTTP, Browser Agent, and Web Search/Page Reader are local-safe payload/preparation blocks until real provider adapters are connected.
+- Web Search and Web Page Reader can make live network requests from the backend. Keep provider/timeouts/byte limits configured for your environment.
+- Email and webhook notifications only deliver externally when SMTP/webhook env vars are set; otherwise they return explicit skipped/captured statuses.
+- OCR requires Tesseract installed locally and `OCR_TESSERACT_CMD` pointing to the executable.
+- Database Query/SQL Assistant are read-only by default. Set `DATABASE_QUERY_DEFAULT_URL` for a non-app database and only enable writes in trusted admin environments.
 
 ## Backend Capabilities
 
@@ -332,7 +354,7 @@ This replaces old seeded/advanced sample workflows and creates 12 advanced local
 - `Advanced: Insurance Underwriting Risk Workbench`
 - `Advanced: Insurance Fraud + Subrogation Triage`
 
-The refined samples cover multi-collection RAG, persistent conversation memory, query rewriting, re-ranking, citation verification, document upload/extraction, AI field extraction, schema validation, insurance claim coverage review, underwriting risk scoring, SIU/subrogation triage, approvals, notifications, exports, guardrails, web-search/page-reader placeholders, dashboard previews, JSON outputs, and run logging.
+The refined samples cover multi-collection RAG, persistent conversation memory, query rewriting, re-ranking, citation verification, document upload/extraction, OCR-ready extraction, AI field extraction, schema validation, insurance claim coverage review, underwriting risk scoring, SIU/subrogation triage, approvals, SMTP/webhook-ready notifications, exports, guardrails, live web search/page reading, dashboard previews, JSON outputs, and run logging.
 
 ## Validation
 
@@ -351,7 +373,10 @@ Frontend:
 ```bash
 npm run typecheck:web
 npm run build:web
+npm run e2e
 ```
+
+E2E tests use Playwright. Run `npm install` after pulling changes so `@playwright/test` is installed, then run `npx playwright install chromium` once if the browser binary is missing.
 
 Last known local validation:
 

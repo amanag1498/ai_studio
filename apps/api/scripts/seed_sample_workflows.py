@@ -257,7 +257,7 @@ BLOCKS: dict[str, BlockSpec] = {
         "Preview intermediate or final payloads in a dashboard-friendly shape.",
         "#4f46e5",
         "DP",
-        (Port("content", "Content", ("text", "json", "preview", "chat")),),
+        (Port("content", "Content", ("text", "json", "preview", "chat", "knowledge")),),
         (),
         {"view": "auto"},
     ),
@@ -725,6 +725,120 @@ def sample_underwriting_application_text() -> str:
 
 def build_samples() -> list[dict[str, Any]]:
     return [
+        graph(
+            "basic-simple-chatbot",
+            "Basic: Simple Chatbot",
+            [
+                node("chat_input", "chat_input-1", 60, 180, {"placeholder": "Ask a general question."}),
+                node(
+                    "chatbot",
+                    "chatbot-1",
+                    390,
+                    180,
+                    {
+                        "systemPrompt": "You are a helpful AI Studio assistant. Answer clearly and concisely.",
+                        "answerStyle": "conversational",
+                        "temperature": 0.3,
+                    },
+                ),
+                node("chat_output", "chat_output-1", 720, 180),
+            ],
+            [
+                edge("chat_input-1", "message", "chatbot-1", "message", "user message"),
+                edge("chatbot-1", "reply", "chat_output-1", "message", "assistant answer"),
+            ],
+        ),
+        graph(
+            "basic-file-rag-qa",
+            "Basic: File RAG Q&A App",
+            [
+                node("file_upload", "file_upload-1", 60, 120, {"sourceMode": "runtime_or_library", "defaultLocalPaths": "", "multiple": False}),
+                node("text_extraction", "text_extraction-1", 390, 120),
+                node("chat_input", "chat_input-1", 60, 420, {"placeholder": "Ask a question about the uploaded file."}),
+                node("rag_knowledge", "rag_knowledge-1", 720, 230, {"collection": "basic-file-rag-qa", "ingestMode": "refresh_collection", "chunkSize": 450, "overlap": 80, "topK": 4, "tags": "basic,file,qa"}),
+                node("chatbot", "chatbot-1", 1050, 230, {"systemPrompt": "Answer using only the uploaded document context. Cite sources when available.", "answerStyle": "conversational"}),
+                node("chat_output", "chat_output-1", 1380, 150),
+                node("dashboard_preview", "dashboard-1", 1380, 360),
+            ],
+            [
+                edge("file_upload-1", "file", "text_extraction-1", "file", "extract upload"),
+                edge("text_extraction-1", "document", "rag_knowledge-1", "document", "ingest file"),
+                edge("chat_input-1", "message", "rag_knowledge-1", "query", "retrieve evidence"),
+                edge("chat_input-1", "message", "chatbot-1", "message", "question"),
+                edge("rag_knowledge-1", "knowledge", "chatbot-1", "context", "document evidence"),
+                edge("chatbot-1", "reply", "chat_output-1", "message", "answer"),
+                edge("chatbot-1", "reply", "dashboard-1", "content", "answer preview"),
+            ],
+        ),
+        graph(
+            "basic-document-summary-json",
+            "Basic: Document Summary + JSON",
+            [
+                node("file_upload", "file_upload-1", 60, 140, {"sourceMode": "runtime_or_library", "defaultLocalPaths": "", "multiple": False}),
+                node("text_extraction", "text_extraction-1", 390, 140),
+                node("summarizer", "summarizer-1", 720, 140, {"style": "concise executive summary", "maxWords": 180}),
+                node("extraction_ai", "extract_fields-1", 720, 380, {"schemaPrompt": "Return JSON with keys: title, summary, key_points, risks, action_items", "strictMode": True}),
+                node("dashboard_preview", "dashboard-1", 1050, 140),
+                node("json_output", "json_output-1", 1050, 380, {"prettyPrint": True}),
+                node("logger", "logger-1", 1050, 610, {"level": "info"}),
+            ],
+            [
+                edge("file_upload-1", "file", "text_extraction-1", "file", "extract document"),
+                edge("text_extraction-1", "document", "summarizer-1", "content", "summarize"),
+                edge("text_extraction-1", "document", "extract_fields-1", "content", "extract fields"),
+                edge("summarizer-1", "summary", "dashboard-1", "content", "preview summary"),
+                edge("extract_fields-1", "json", "json_output-1", "payload", "structured fields"),
+                edge("extract_fields-1", "json", "logger-1", "payload", "debug extraction"),
+            ],
+        ),
+        graph(
+            "basic-form-intake-dashboard",
+            "Basic: Form Intake Dashboard",
+            [
+                node("form_input", "form_input-1", 60, 180, {"fields": "name:text\nemail:text\nrequest:textarea\npriority:select", "defaultValues": '{"name":"Demo User","email":"demo@example.com","request":"Summarize this request","priority":"normal"}'}),
+                node("summarizer", "summarizer-1", 390, 180, {"style": "short intake brief", "maxWords": 120}),
+                node("condition", "condition-1", 720, 180, {"expression": "contains:urgent"}),
+                node("dashboard_preview", "dashboard-1", 1050, 120),
+                node("json_output", "json_output-1", 1050, 340),
+                node("logger", "logger-1", 1050, 560),
+            ],
+            [
+                edge("form_input-1", "text", "summarizer-1", "content", "summarize request"),
+                edge("summarizer-1", "summary", "condition-1", "value", "priority check"),
+                edge("summarizer-1", "summary", "dashboard-1", "content", "manager preview"),
+                edge("condition-1", "true", "json_output-1", "payload", "urgent payload"),
+                edge("form_input-1", "json", "logger-1", "payload", "audit intake"),
+            ],
+        ),
+        graph(
+            "advanced-pure-chatbot-concierge",
+            "Advanced: Pure Chatbot Concierge",
+            [
+                node("chat_input", "chat_input-1", 60, 180, {"placeholder": "Ask the concierge to draft, explain, brainstorm, or plan."}),
+                node("conversation_memory", "memory-1", 390, 180, {"namespace": "pure-chatbot-concierge", "windowSize": 10}),
+                node(
+                    "chatbot",
+                    "chatbot-1",
+                    720,
+                    180,
+                    {
+                        "systemPrompt": "You are AI Studio Concierge. Be concise, practical, friendly, and ask for clarification only when required. Do not claim to use documents unless context is provided.",
+                        "answerStyle": "conversational",
+                        "outputMode": "markdown_report",
+                        "temperature": 0.4,
+                    },
+                ),
+                node("chat_output", "chat_output-1", 1050, 120),
+                node("logger", "logger-1", 1050, 330, {"level": "info", "traceMode": "friendly"}),
+            ],
+            [
+                edge("chat_input-1", "message", "memory-1", "message", "remember user turn"),
+                edge("chat_input-1", "message", "chatbot-1", "message", "user message"),
+                edge("memory-1", "memory", "chatbot-1", "context", "recent context"),
+                edge("chatbot-1", "reply", "chat_output-1", "message", "assistant answer"),
+                edge("chatbot-1", "reply", "logger-1", "payload", "debug response"),
+            ],
+        ),
         graph(
             "advanced-multi-rag-contract-intelligence",
             "Advanced: Multi-RAG Contract Intelligence",
@@ -1266,6 +1380,12 @@ def reset_seeded_workflows(session) -> None:
     session.flush()
 
 
+def should_publish_as_chat(graph_json: dict[str, Any]) -> bool:
+    block_types = {node["data"]["blockType"] for node in graph_json.get("nodes", [])}
+    app_only_blocks = {"file_upload", "form_input", "text_extraction", "dashboard_preview", "json_output", "approval_step"}
+    return {"chat_input", "chat_output"}.issubset(block_types) and not block_types.intersection(app_only_blocks)
+
+
 def main() -> None:
     create_db_and_storage_dirs()
     with SessionLocal() as session:
@@ -1276,8 +1396,7 @@ def main() -> None:
             created.append(workflow)
 
         for workflow in created:
-            block_types = {node["data"]["blockType"] for node in workflow.graph_json.get("nodes", [])}
-            if {"chat_input", "chat_output"}.issubset(block_types):
+            if should_publish_as_chat(workflow.graph_json):
                 publish_workflow(session, workflow.id, None)
 
         print("Seeded sample workflows:")

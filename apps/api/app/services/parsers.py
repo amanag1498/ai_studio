@@ -11,6 +11,7 @@ from docx import Document as DocxDocument
 from pypdf import PdfReader
 
 from app.models.workflow import UploadedFile
+from app.services.ocr import run_tesseract_ocr
 
 
 @dataclass
@@ -92,10 +93,17 @@ class PdfDocumentParser(DocumentParser):
 
 class OcrDocumentParser(DocumentParser):
     parser_name = "ocr"
-    extensions = ()
+    extensions = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")
 
     def parse(self, uploaded_file: UploadedFile) -> ParsedDocument:
-        raise NotImplementedError("OCR parsing is not implemented yet.")
+        language = str((uploaded_file.metadata_json or {}).get("ocr_language") or "eng")
+        result = run_tesseract_ocr(uploaded_file.storage_path, language=language)
+        metadata = {
+            **result.metadata,
+            "filename": uploaded_file.original_name,
+            "file_id": uploaded_file.id,
+        }
+        return ParsedDocument(text=result.text, metadata=metadata)
 
 
 DOCUMENT_PARSERS: tuple[DocumentParser, ...] = (

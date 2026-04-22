@@ -24,6 +24,9 @@ from app.models.workflow import (
 from app.schemas.execution import ExecuteWorkflowRequest, RuntimeNodeInput
 from app.schemas.workflows import BuilderGraphPayload
 from app.services.files import parse_accept_extensions, parse_max_size_bytes, persist_uploaded_file
+from app.services.database_query import execute_database_query as run_database_query
+from app.services.database_query import introspect_schema, is_read_only_sql
+from app.services.delivery import get_email_provider, get_notification_provider, split_recipients
 from app.services.llm import LlmMessage, LlmProvider, get_default_llm_provider
 from app.services.parsers import parse_uploaded_file
 from app.services.rag import (
@@ -35,6 +38,8 @@ from app.services.rag import (
     should_retrieve_chunks,
 )
 from app.services.workflows import get_workflow_or_404, validate_graph
+from app.services.web_reader import fetch_readable_page
+from app.services.web_search import get_web_search_provider
 
 
 OUTPUT_BLOCK_TYPES = {
@@ -44,9 +49,12 @@ OUTPUT_BLOCK_TYPES = {
     "logger",
     "citation_formatter",
     "email_sender",
+    "email",
     "slack_notification",
+    "notification",
     "csv_excel_export",
     "database_writer",
+    "database_query",
 }
 
 
@@ -151,7 +159,8 @@ def execute_prepared_workflow_run(
     workflow_started_perf = perf_counter()
     workflow_run.status = "running"
     workflow_run.started_at = utc_now_naive()
-    workflow_run.log_messages = [log_entry("info", "Workflow run started.")]
+    workflow_run.log_messages = list(workflow_run.log_messages or []) + [log_entry("info", "Workflow run started.")]
+    workflow_audit_logs = list(workflow_run.log_messages or [])
     session.add(workflow_run)
     session.commit()
 
@@ -174,6 +183,17 @@ def execute_prepared_workflow_run(
 
     try:
         for execution_index, node in enumerate(ordered_nodes):
+            session.refresh(workflow_run)
+            if workflow_run.status == "cancelled":
+                workflow_run.completed_at = utc_now_naive()
+                workflow_run.latency_ms = elapsed_ms(workflow_started_perf)
+                workflow_run.output_payload = final_outputs
+                workflow_run.preview_payload = preview_outputs
+                workflow_run.log_messages = workflow_audit_logs + context.run_logs + [log_entry("warning", "Workflow run cancelled before the next node started.")]
+                session.add(workflow_run)
+                session.commit()
+                return get_run_or_404(session, workflow.id, workflow_run.id)
+
             node_started_perf = perf_counter()
             node_run = WorkflowNodeRun(
                 workflow_run_id=workflow_run.id,
@@ -227,7 +247,7 @@ def execute_prepared_workflow_run(
                 workflow_run.error_message = f"Node '{node['id']}' failed: {exc}"
                 workflow_run.output_payload = final_outputs
                 workflow_run.preview_payload = preview_outputs
-                workflow_run.log_messages = context.run_logs + node_run.log_messages
+                workflow_run.log_messages = workflow_audit_logs + context.run_logs + node_run.log_messages
                 session.add(workflow_run)
                 session.commit()
                 return get_run_or_404(session, workflow.id, workflow_run.id)
@@ -237,7 +257,7 @@ def execute_prepared_workflow_run(
         workflow_run.latency_ms = elapsed_ms(workflow_started_perf)
         workflow_run.output_payload = final_outputs
         workflow_run.preview_payload = preview_outputs
-        workflow_run.log_messages = context.run_logs
+        workflow_run.log_messages = workflow_audit_logs + context.run_logs
         session.add(workflow_run)
         session.commit()
         return get_run_or_404(session, workflow.id, workflow_run.id)
@@ -323,6 +343,8 @@ def execute_node(node: dict[str, Any], context: ExecutionContext) -> NodeExecuti
         return execute_file_upload(node, context)
     if block_type == "text_extraction":
         return execute_text_extraction(node, context)
+    if block_type == "ocr":
+        return execute_ocr(node, context)
     if block_type == "rag_knowledge":
         return execute_rag_knowledge(node, context)
     if block_type == "chatbot":
@@ -357,9 +379,9 @@ def execute_node(node: dict[str, Any], context: ExecutionContext) -> NodeExecuti
         return execute_loop_for_each(node, context)
     if block_type == "approval_step":
         return execute_approval_step(node, context)
-    if block_type == "email_sender":
+    if block_type in {"email_sender", "email"}:
         return execute_email_sender(node, context)
-    if block_type == "slack_notification":
+    if block_type in {"slack_notification", "notification"}:
         return execute_slack_notification(node, context)
     if block_type == "database_writer":
         return execute_database_writer(node, context)
@@ -377,6 +399,10 @@ def execute_node(node: dict[str, Any], context: ExecutionContext) -> NodeExecuti
         return execute_web_search(node, context)
     if block_type == "web_page_reader":
         return execute_web_page_reader(node, context)
+    if block_type == "database_query":
+        return execute_database_query_node(node, context)
+    if block_type == "sql_assistant":
+        return execute_sql_assistant(node, context)
     if block_type == "browser_agent":
         return execute_browser_agent(node, context)
     if block_type == "re_ranker":
@@ -427,9 +453,17 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
     files = runtime.files if runtime else []
     if not files and runtime and isinstance(runtime.value, list):
         files = [str(item) for item in runtime.value]
-    library_file_ids = parse_library_file_ids(node["data"]["config"].get("libraryFileIds"))
-    library_files = load_library_files(context, library_file_ids)
-    if not files:
+    source_mode = str(node["data"]["config"].get("sourceMode", "runtime_or_library"))
+    library_file_ids: list[int] = []
+    library_files: list[UploadedFile] = []
+
+    # Runtime uploads are an explicit user action, so they always win over saved
+    # library/default configuration. This keeps reusable workflows from quietly
+    # answering from an old sample document after the user chooses a new file.
+    if not files and source_mode in {"runtime_or_library", "library"}:
+        library_file_ids = parse_library_file_ids(node["data"]["config"].get("libraryFileIds"))
+        library_files = load_library_files(context, library_file_ids)
+    if not files and not library_files and source_mode in {"runtime_or_library", "default_path"}:
         files = parse_default_file_paths(node["data"]["config"].get("defaultLocalPaths"))
     if not files and not library_files:
         raise ValueError("File Upload node requires runtime file paths.")
@@ -476,7 +510,7 @@ def execute_file_upload(node: dict[str, Any], context: ExecutionContext) -> Node
             "files": persisted_file_metadata,
             "accepted_extensions": sorted(accepted_extensions),
             "max_size_bytes": max_size_bytes,
-            "source_mode": node["data"]["config"].get("sourceMode", "runtime_or_library"),
+            "source_mode": source_mode,
             "library_file_ids": library_file_ids,
             "count": len(persisted_file_metadata),
         },
@@ -561,7 +595,7 @@ def build_extraction_quality_report(uploaded_file: UploadedFile, text: str, pars
     words = re.findall(r"\w+", text)
     warnings: list[str] = []
     if not text.strip():
-        warnings.append("No extractable text found. OCR may be required in a future OCR block.")
+        warnings.append("No extractable text found. Try the OCR block/strategy for scanned or image-heavy files.")
     if uploaded_file.extension == ".pdf" and parser_metadata.get("page_count") and len(words) < 20:
         warnings.append("PDF text is very short for its page count; it may be scanned or image-heavy.")
     detected_tables = int(parser_metadata.get("row_count", 0) or text.count("\n|"))
@@ -674,6 +708,23 @@ def execute_text_extraction(node: dict[str, Any], context: ExecutionContext) -> 
         preview={"label": node["data"]["label"], "output": payload.preview, "text": text_payload.preview},
         logs=[log_entry("info", f"Extracted text from {len(extracted_documents)} document(s); {len(failed_documents)} failed.")],
     )
+
+
+def execute_ocr(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    ocr_node = {
+        **node,
+        "data": {
+            **node["data"],
+            "config": {
+                **node["data"].get("config", {}),
+                "strategy": "ocr",
+                "qualityReport": True,
+            },
+        },
+    }
+    result = execute_text_extraction(ocr_node, context)
+    result.logs.append(log_entry("info", "OCR block used the parser abstraction with the configured local OCR provider."))
+    return result
 
 
 def execute_rag_knowledge(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
@@ -1218,27 +1269,62 @@ def execute_approval_step(node: dict[str, Any], context: ExecutionContext) -> No
 
 def execute_email_sender(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     content = merge_payload_values(context.node_inputs[node["id"]].get("content", []))
+    config = node["data"]["config"]
+    provider = get_email_provider()
+    to = split_recipients(str(config.get("to", "")))
+    subject = str(config.get("subject", "AI Studio notification") or "AI Studio notification")
+    body = str(content if content is not None else config.get("body", ""))
+    try:
+        delivery = provider.send(
+            to=to,
+            cc=split_recipients(str(config.get("cc", ""))),
+            bcc=split_recipients(str(config.get("bcc", ""))),
+            subject=subject,
+            text_body=body,
+            html_body=str(config.get("htmlBody", "") or "") or None,
+        )
+        status_value = delivery.status
+        detail = delivery.detail
+        metadata = delivery.metadata
+    except Exception as exc:
+        status_value = "failed"
+        detail = str(exc)
+        metadata = {"to_count": len(to)}
     message = {
-        "to": node["data"]["config"].get("to", ""),
-        "subject": node["data"]["config"].get("subject", "AI Studio notification"),
-        "content": content,
-        "status": "prepared",
-        "note": "Email provider adapter is not enabled; this payload is ready for a future sender.",
+        "to": to,
+        "subject": subject,
+        "status": status_value,
+        "provider": provider.provider_name,
+        "detail": detail,
+        "metadata": metadata,
     }
     payload = typed_payload("json", message, summarize_preview_content(message))
-    return single_output_result("status", payload, node["data"]["label"], "Email payload prepared.")
+    return single_output_result("status", payload, node["data"]["label"], f"Email delivery {status_value}.")
 
 
 def execute_slack_notification(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     content = merge_payload_values(context.node_inputs[node["id"]].get("content", []))
+    config = node["data"]["config"]
+    channel = str(config.get("channel", "#ai-studio") or "#ai-studio")
+    provider = get_notification_provider(str(config.get("provider", "")))
+    try:
+        delivery = provider.deliver(channel=channel, content=content, title=str(config.get("title", "AI Studio notification")))
+        status_value = delivery.status
+        detail = delivery.detail
+        metadata = delivery.metadata
+    except Exception as exc:
+        status_value = "failed"
+        detail = str(exc)
+        metadata = {"channel": channel}
     message = {
-        "channel": node["data"]["config"].get("channel", "#ai-studio"),
-        "content": content,
-        "status": "prepared",
-        "note": "Slack/Teams/Discord adapter is not enabled; this payload is ready for a future notifier.",
+        "channel": channel,
+        "status": status_value,
+        "provider": provider.provider_name,
+        "detail": detail,
+        "metadata": metadata,
     }
     payload = typed_payload("json", message, summarize_preview_content(message))
-    return single_output_result("status", payload, node["data"]["label"], "Notification payload prepared.")
+    return single_output_result("status", payload, node["data"]["label"], f"Notification delivery {status_value}.")
 
 
 def execute_database_writer(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
@@ -1340,33 +1426,112 @@ def execute_long_term_memory(node: dict[str, Any], context: ExecutionContext) ->
 
 def execute_web_search(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     query = str(first_payload_value(context.node_inputs[node["id"]].get("query", [])) or "")
-    top_k = int(node["data"]["config"].get("topK", 5))
-    results = [
-        {
-            "title": f"Prepared search result {index + 1} for {query}",
-            "url": f"https://example.com/search/{index + 1}",
-            "snippet": f"Local-first placeholder result for query '{query}'. Connect a search provider adapter to fetch live web results.",
-            "provider": node["data"]["config"].get("provider", "local-placeholder"),
-        }
-        for index in range(top_k)
-    ]
-    payload = typed_payload("knowledge", {"query": query, "matches": results}, {"query": query, "match_count": len(results)})
-    return single_output_result("results", payload, node["data"]["label"], "Web Search prepared local placeholder results.")
+    top_k = min(max(int(node["data"]["config"].get("topK", 5)), 1), settings.web_search_max_results)
+    provider = get_web_search_provider(str(node["data"]["config"].get("provider", "")))
+    try:
+        search_results = provider.search(query, top_k=top_k)
+        results = [
+            {
+                "title": item.title,
+                "url": item.url,
+                "snippet": item.snippet,
+                "source": item.source,
+                "provider": item.source,
+                "rank": item.rank,
+            }
+            for item in search_results
+        ]
+        status_value = "ok"
+        error = None
+    except Exception as exc:
+        results = []
+        status_value = "failed"
+        error = str(exc)
+    payload = typed_payload(
+        "knowledge",
+        {"query": query, "matches": results, "provider": provider.provider_name, "status": status_value, "error": error},
+        {"query": query, "match_count": len(results), "provider": provider.provider_name, "status": status_value},
+    )
+    return single_output_result("results", payload, node["data"]["label"], f"Web Search returned {len(results)} result(s).")
 
 
 def execute_web_page_reader(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
     url = str(first_payload_value(context.node_inputs[node["id"]].get("url", [])) or node["data"]["config"].get("url", ""))
-    content = (
-        f"Reader-mode placeholder for {url}. "
-        "Live fetching is intentionally adapter-gated for local-first safety."
-    )
+    reader_mode = str(node["data"]["config"].get("readerMode", "text"))
+    page = fetch_readable_page(url, markdown=reader_mode == "markdown")
     payload = typed_payload(
         "document",
-        {"documents": [{"source_path": url, "text": content, "metadata": {"url": url, "source": "web_page_reader"}}], "combined_text": content},
-        {"text_preview": preview_text(content), "url": url},
-        {"url": url},
+        {
+            "documents": [
+                {
+                    "source_path": page.url,
+                    "text": page.text,
+                    "metadata": {"url": page.url, "title": page.title, **page.metadata},
+                }
+            ],
+            "combined_text": page.text,
+            "metadata": {"title": page.title, **page.metadata},
+        },
+        {"text_preview": preview_text(page.text), "url": page.url, "title": page.title, "word_count": page.metadata.get("word_count")},
+        {"url": page.url, "title": page.title, "word_count": page.metadata.get("word_count")},
     )
-    return single_output_result("document", payload, node["data"]["label"], "Web Page Reader prepared a normalized document.")
+    return single_output_result("document", payload, node["data"]["label"], "Web Page Reader fetched readable content.")
+
+
+def execute_database_query_node(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    incoming = first_payload_value(context.node_inputs[node["id"]].get("query", []))
+    config = node["data"]["config"]
+    sql = str((incoming.get("sql") if isinstance(incoming, dict) else incoming) or config.get("query", ""))
+    parameters = incoming.get("parameters", {}) if isinstance(incoming, dict) else {}
+    connection_url = str(config.get("connectionUrl", "") or settings.database_query_default_url or "")
+    limit = int(config.get("limit", 100) or 100)
+    allow_writes = bool(config.get("allowWrites", settings.database_query_allow_writes))
+    try:
+        result = run_database_query(sql, connection_url=connection_url or None, parameters=parameters, allow_writes=allow_writes, limit=limit)
+        payload_value = {
+            "columns": result.columns,
+            "rows": result.rows,
+            "row_count": result.row_count,
+            "dialect": result.dialect,
+            "read_only": result.read_only,
+            "sql": sql,
+        }
+        message = f"Database Query returned {result.row_count} row(s)."
+    except Exception as exc:
+        payload_value = {"columns": [], "rows": [], "row_count": 0, "sql": sql, "error": str(exc), "status": "failed"}
+        message = f"Database Query failed: {exc}"
+    payload = typed_payload("json", payload_value, summarize_preview_content(payload_value), {"read_only": is_read_only_sql(sql)})
+    return single_output_result("rows", payload, node["data"]["label"], message)
+
+
+def execute_sql_assistant(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:
+    question = str(first_payload_value(context.node_inputs[node["id"]].get("question", [])) or node["data"]["config"].get("question", ""))
+    config = node["data"]["config"]
+    connection_url = str(config.get("connectionUrl", "") or settings.database_query_default_url or "")
+    schema = introspect_schema(connection_url=connection_url or None)
+    table_names = [table["name"] for table in schema.get("tables", [])]
+    selected_table = next((table for table in table_names if table.lower() in question.lower()), table_names[0] if table_names else "")
+    limit = int(config.get("limit", 50) or 50)
+    generated_sql = f"SELECT * FROM {selected_table} LIMIT {limit}" if selected_table else "-- No tables found for this connection"
+    execute_query = bool(config.get("executeQuery", False))
+    execution_result: dict[str, Any] | None = None
+    if execute_query and selected_table:
+        result = run_database_query(generated_sql, connection_url=connection_url or None, limit=limit)
+        execution_result = {"columns": result.columns, "rows": result.rows, "row_count": result.row_count}
+    payload_value = {
+        "question": question,
+        "schema": schema,
+        "sql": generated_sql,
+        "read_only": is_read_only_sql(generated_sql),
+        "explanation": "SQL Assistant introspected the configured database and generated a safe read-only starter query. Review before enabling execution.",
+        "execution": execution_result,
+    }
+    payload = typed_payload("json", payload_value, {"sql": generated_sql, "tables": table_names, "executed": execution_result is not None})
+    return NodeExecutionResult(
+        outputs={"query": typed_payload("text", generated_sql, generated_sql), "plan": payload},
+        preview=payload.preview,
+        logs=[log_entry("info", "SQL Assistant generated a read-only query plan.")],
+    )
 
 
 def execute_browser_agent(node: dict[str, Any], context: ExecutionContext) -> NodeExecutionResult:

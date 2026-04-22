@@ -65,6 +65,16 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         ),
         fields=(BlockFieldDefinition(key="strategy", required=True, allow_blank=False), BlockFieldDefinition(key="qualityReport", required=False)),
     ),
+    "ocr": BlockDefinition(
+        block_type="ocr",
+        inputs=(BlockPortDefinition(id="file", data_types=("file",), required=True),),
+        outputs=(
+            BlockPortDefinition(id="document", data_types=("document", "text")),
+            BlockPortDefinition(id="text", data_types=("text",)),
+            BlockPortDefinition(id="metadata", data_types=("json",)),
+        ),
+        fields=(BlockFieldDefinition(key="ocrProvider", required=False), BlockFieldDefinition(key="languageHints", required=False)),
+    ),
     "rag_knowledge": BlockDefinition(
         block_type="rag_knowledge",
         inputs=(
@@ -231,11 +241,23 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         outputs=(BlockPortDefinition(id="status", data_types=("json", "text")),),
         fields=(BlockFieldDefinition(key="to", required=True, allow_blank=False), BlockFieldDefinition(key="subject", required=True, allow_blank=False)),
     ),
+    "email": BlockDefinition(
+        block_type="email",
+        inputs=(BlockPortDefinition(id="content", data_types=("text", "json", "chat"), required=True),),
+        outputs=(BlockPortDefinition(id="status", data_types=("json", "text")),),
+        fields=(BlockFieldDefinition(key="to", required=True, allow_blank=False), BlockFieldDefinition(key="subject", required=True, allow_blank=False)),
+    ),
     "slack_notification": BlockDefinition(
         block_type="slack_notification",
         inputs=(BlockPortDefinition(id="content", data_types=("text", "json", "chat"), required=True),),
         outputs=(BlockPortDefinition(id="status", data_types=("json", "text")),),
         fields=(BlockFieldDefinition(key="channel", required=True, allow_blank=False),),
+    ),
+    "notification": BlockDefinition(
+        block_type="notification",
+        inputs=(BlockPortDefinition(id="content", data_types=("text", "json", "chat"), required=True),),
+        outputs=(BlockPortDefinition(id="status", data_types=("json", "text")),),
+        fields=(BlockFieldDefinition(key="channel", required=True, allow_blank=False), BlockFieldDefinition(key="provider", required=False)),
     ),
     "database_writer": BlockDefinition(
         block_type="database_writer",
@@ -284,6 +306,18 @@ BLOCK_DEFINITIONS: dict[str, BlockDefinition] = {
         inputs=(BlockPortDefinition(id="url", data_types=("text",), required=True),),
         outputs=(BlockPortDefinition(id="document", data_types=("document", "text")),),
         fields=(BlockFieldDefinition(key="url", required=False), BlockFieldDefinition(key="readerMode", required=True, allow_blank=False)),
+    ),
+    "database_query": BlockDefinition(
+        block_type="database_query",
+        inputs=(BlockPortDefinition(id="query", data_types=("text", "json"), required=True),),
+        outputs=(BlockPortDefinition(id="rows", data_types=("json", "text")),),
+        fields=(BlockFieldDefinition(key="connectionUrl", required=False), BlockFieldDefinition(key="timeoutSeconds", required=False)),
+    ),
+    "sql_assistant": BlockDefinition(
+        block_type="sql_assistant",
+        inputs=(BlockPortDefinition(id="question", data_types=("chat", "text"), required=True),),
+        outputs=(BlockPortDefinition(id="query", data_types=("text", "json")), BlockPortDefinition(id="plan", data_types=("json",))),
+        fields=(BlockFieldDefinition(key="dialect", required=False), BlockFieldDefinition(key="readOnly", required=False)),
     ),
     "browser_agent": BlockDefinition(
         block_type="browser_agent",

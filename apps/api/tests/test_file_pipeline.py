@@ -194,3 +194,56 @@ def test_file_upload_uses_default_local_paths_when_runtime_is_empty(db_session):
     files = upload_result.outputs["file"].value
     assert len(files) == 1
     assert files[0]["original_name"] == "sample_company_policy.txt"
+
+
+def test_file_upload_runtime_file_overrides_library_and_default_paths(db_session, tmp_path: Path):
+    workflow, workflow_run = create_workflow_and_run(db_session)
+    runtime_path = tmp_path / "runtime-choice.txt"
+    runtime_path.write_text("Runtime selected document", encoding="utf-8")
+    library_path = tmp_path / "library-choice.txt"
+    library_path.write_text("Library default document", encoding="utf-8")
+    default_path = resolve_runtime_file_path("storage/default-choice.txt")
+    default_path.parent.mkdir(parents=True, exist_ok=True)
+    default_path.write_text("Default fallback document", encoding="utf-8")
+
+    library_file = persist_uploaded_file(
+        db_session,
+        source_path=library_path,
+        workflow=workflow,
+        workflow_run=workflow_run,
+        node_id="library",
+        max_size_bytes=DEFAULT_MAX_UPLOAD_SIZE_BYTES,
+    )
+
+    file_upload_node = {
+        "id": "file-upload-1",
+        "data": {
+            "label": "File Upload",
+            "blockType": "file_upload",
+            "config": {
+                "sourceMode": "runtime_or_library",
+                "libraryFileIds": str(library_file.id),
+                "accept": ".txt",
+                "multiple": False,
+                "maxSizeMb": 5,
+                "defaultLocalPaths": "storage/default-choice.txt",
+            },
+        },
+    }
+    context = ExecutionContext(
+        session=db_session,
+        workflow=workflow,
+        workflow_run=workflow_run,
+        runtime_inputs={"file-upload-1": RuntimeNodeInput(files=[str(runtime_path)])},
+        node_inputs={},
+        node_outputs={},
+        memory_store={},
+        run_logs=[],
+        uploaded_files_by_node=defaultdict(list),
+    )
+
+    upload_result = execute_file_upload(file_upload_node, context)
+
+    files = upload_result.outputs["file"].value
+    assert len(files) == 1
+    assert files[0]["original_name"] == "runtime-choice.txt"

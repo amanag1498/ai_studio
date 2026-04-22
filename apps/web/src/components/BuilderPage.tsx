@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
-  MiniMap,
   Panel,
   ReactFlowProvider,
   addEdge,
@@ -22,6 +21,7 @@ import {
   ChevronLeft,
   ClipboardCheck,
   FolderOpen,
+  Keyboard,
   LayoutDashboard,
   Maximize2,
   PanelLeftOpen,
@@ -159,6 +159,41 @@ type RunDisplayCard = {
   metadata?: unknown;
 };
 
+type DataFlowMapping = {
+  inputPortId: string;
+  inputLabel: string;
+  inputTypes: string[];
+  required: boolean;
+  sources: Array<{
+    edgeId: string;
+    sourceNodeId: string;
+    sourceNodeLabel: string;
+    sourceBlockType: string;
+    sourcePortId: string;
+    sourcePortLabel: string;
+    sourceTypes: string[];
+    edgeLabel: string;
+    lastPreview?: string;
+  }>;
+};
+
+type DataFlowOutputMapping = {
+  outputPortId: string;
+  outputLabel: string;
+  outputTypes: string[];
+  targets: Array<{
+    edgeId: string;
+    targetNodeId: string;
+    targetNodeLabel: string;
+    targetBlockType: string;
+    targetPortId: string;
+    targetPortLabel: string;
+    targetTypes: string[];
+    edgeLabel: string;
+    lastPreview?: string;
+  }>;
+};
+
 function toFlowNodes(nodes: BuilderNode[]): Node[] {
   return nodes.map((node) => ({
     ...node,
@@ -175,15 +210,118 @@ function toFlowEdges(edges: BuilderEdge[]): Edge[] {
   }));
 }
 
+function handlePortId(handle: string | null | undefined, fallback = "unknown") {
+  return String(handle || "").split(":", 2)[1] || fallback;
+}
+
+function getBuilderNode(nodes: BuilderNode[], nodeId: string) {
+  return nodes.find((node) => node.id === nodeId);
+}
+
+function getNodePort(
+  node: BuilderNode | undefined,
+  direction: "input" | "output",
+  portId: string,
+) {
+  const ports = direction === "input" ? node?.data.inputs : node?.data.outputs;
+  return ports?.find((port) => port.id === portId);
+}
+
+function getEdgeAutoLabel(edge: BuilderEdge, nodes: BuilderNode[]) {
+  const sourceNode = getBuilderNode(nodes, edge.source);
+  const targetNode = getBuilderNode(nodes, edge.target);
+  const sourcePortId = handlePortId(edge.sourceHandle, "output");
+  const targetPortId = handlePortId(edge.targetHandle, "input");
+  const sourcePort = getNodePort(sourceNode, "output", sourcePortId);
+  const targetPort = getNodePort(targetNode, "input", targetPortId);
+  const sourceLabel = sourcePort?.label || sourcePortId;
+  const targetLabel = targetPort?.label || targetPortId;
+  return `${sourceLabel} -> ${targetLabel}`;
+}
+
+function getEdgeDataTypes(edge: BuilderEdge, nodes: BuilderNode[]) {
+  const sourceNode = getBuilderNode(nodes, edge.source);
+  const sourcePort = getNodePort(sourceNode, "output", handlePortId(edge.sourceHandle, "output"));
+  return sourcePort?.dataTypes || [];
+}
+
+function getEdgeColor(edge: BuilderEdge, nodes: BuilderNode[]) {
+  const dataTypes = getEdgeDataTypes(edge, nodes);
+  if (dataTypes.includes("knowledge")) return "#41a86f";
+  if (dataTypes.includes("document") || dataTypes.includes("file")) return "#d99a21";
+  if (dataTypes.includes("chat")) return "#ff765d";
+  if (dataTypes.includes("json")) return "#7f6dff";
+  if (dataTypes.includes("boolean")) return "#e24d4d";
+  return "#4f8cff";
+}
+
+function decorateFlowEdges(
+  edges: Edge[],
+  nodes: BuilderNode[],
+  selectedEdgeId: string | null,
+  selectedNodeId?: string,
+) {
+  return edges.map((edge) => {
+    const builderEdge = edge as BuilderEdge;
+    const color = getEdgeColor(builderEdge, nodes);
+    const autoLabel = getEdgeAutoLabel(builderEdge, nodes);
+    const savedLabel = String(builderEdge.label || "").trim();
+    const label = savedLabel && savedLabel !== autoLabel ? `${autoLabel} · ${savedLabel}` : autoLabel;
+    const selected = edge.id === selectedEdgeId || edge.selected;
+    const relatedToSelectedNode = selectedNodeId ? edge.source === selectedNodeId || edge.target === selectedNodeId : false;
+    const dimUnrelated = Boolean(selectedNodeId && !relatedToSelectedNode && !selected);
+    return {
+      ...edge,
+      selected,
+      label,
+      animated: selected || relatedToSelectedNode || edge.animated,
+      style: {
+        ...(edge.style || {}),
+        stroke: color,
+        strokeOpacity: dimUnrelated ? 0.22 : 1,
+        strokeWidth: selected ? 3.4 : relatedToSelectedNode ? 2.8 : 2.1,
+      },
+      labelBgStyle: {
+        fill: selected ? "#081018" : "rgba(255,255,255,0.92)",
+        fillOpacity: 0.96,
+      },
+      labelStyle: {
+        fill: selected ? "#ffffff" : "#081018",
+        fontSize: 11,
+        fontWeight: 800,
+      },
+    };
+  });
+}
+
 function toBuilderGraph(nodes: Node[], edges: Edge[]): BuilderGraph {
   return formatGraph(nodes as BuilderNode[], edges as BuilderEdge[]);
 }
 
 function isChatWorkflow(graph: BuilderGraph) {
+  const requiresRuntimeFiles = graph.nodes.some((node) => node.data.blockType === "file_upload");
   return (
+    !requiresRuntimeFiles &&
     graph.nodes.some((node) => node.data.blockType === "chat_input") &&
     graph.nodes.some((node) => node.data.blockType === "chat_output")
   );
+}
+
+function getBuilderWorkflowModeLabel(graph: BuilderGraph) {
+  const blockTypes = new Set(graph.nodes.map((node) => node.data.blockType));
+  if (blockTypes.has("file_upload") && blockTypes.has("rag_knowledge") && blockTypes.has("chatbot")) {
+    return "File RAG app";
+  }
+  if (blockTypes.has("rag_knowledge") && blockTypes.has("chatbot")) {
+    return "RAG chatbot";
+  }
+  if (blockTypes.has("file_upload") || blockTypes.has("dashboard_preview") || blockTypes.has("json_output")) {
+    return "Document app";
+  }
+  if (isChatWorkflow(graph)) {
+    return "Chatbot workflow";
+  }
+  return "Builder workflow";
 }
 
 function normalizeGraphForChangeDetection(graph: BuilderGraph) {
@@ -596,6 +734,122 @@ function getNodeRunPreview(workflowRun: WorkflowRunRecord | null, node: BuilderN
   };
 }
 
+function getNodeOutputPreview(workflowRun: WorkflowRunRecord | null, nodeId: string, portId: string) {
+  const nodeRun = workflowRun?.node_runs?.find((run) => run.node_id === nodeId);
+  const outputPayload = nodeRun?.output_payload as Record<string, { preview?: unknown; value?: unknown; type?: unknown }> | undefined;
+  const payload = outputPayload?.[portId];
+  if (!payload) {
+    return undefined;
+  }
+  return summarizeFriendly(payload.preview ?? payload.value ?? payload);
+}
+
+function buildNodeInputMappings(
+  selectedNode: BuilderNode,
+  nodes: BuilderNode[],
+  edges: BuilderEdge[],
+  workflowRun: WorkflowRunRecord | null,
+): DataFlowMapping[] {
+  return selectedNode.data.inputs.map((inputPort) => {
+    const incomingEdges = edges.filter(
+      (edge) => edge.target === selectedNode.id && handlePortId(edge.targetHandle, "") === inputPort.id,
+    );
+    return {
+      inputPortId: inputPort.id,
+      inputLabel: inputPort.label,
+      inputTypes: inputPort.dataTypes,
+      required: Boolean(inputPort.required),
+      sources: incomingEdges.map((edge) => {
+        const sourceNode = getBuilderNode(nodes, edge.source);
+        const sourcePortId = handlePortId(edge.sourceHandle, "output");
+        const sourcePort = getNodePort(sourceNode, "output", sourcePortId);
+        return {
+          edgeId: edge.id,
+          sourceNodeId: edge.source,
+          sourceNodeLabel: sourceNode?.data.label || edge.source,
+          sourceBlockType: sourceNode?.data.blockType || "unknown",
+          sourcePortId,
+          sourcePortLabel: sourcePort?.label || sourcePortId,
+          sourceTypes: sourcePort?.dataTypes || [],
+          edgeLabel: getEdgeAutoLabel(edge, nodes),
+          lastPreview: getNodeOutputPreview(workflowRun, edge.source, sourcePortId),
+        };
+      }),
+    };
+  });
+}
+
+function buildNodeOutputMappings(
+  selectedNode: BuilderNode,
+  nodes: BuilderNode[],
+  edges: BuilderEdge[],
+  workflowRun: WorkflowRunRecord | null,
+): DataFlowOutputMapping[] {
+  return selectedNode.data.outputs.map((outputPort) => {
+    const outgoingEdges = edges.filter(
+      (edge) => edge.source === selectedNode.id && handlePortId(edge.sourceHandle, "") === outputPort.id,
+    );
+    return {
+      outputPortId: outputPort.id,
+      outputLabel: outputPort.label,
+      outputTypes: outputPort.dataTypes,
+      targets: outgoingEdges.map((edge) => {
+        const targetNode = getBuilderNode(nodes, edge.target);
+        const targetPortId = handlePortId(edge.targetHandle, "input");
+        const targetPort = getNodePort(targetNode, "input", targetPortId);
+        return {
+          edgeId: edge.id,
+          targetNodeId: edge.target,
+          targetNodeLabel: targetNode?.data.label || edge.target,
+          targetBlockType: targetNode?.data.blockType || "unknown",
+          targetPortId,
+          targetPortLabel: targetPort?.label || targetPortId,
+          targetTypes: targetPort?.dataTypes || [],
+          edgeLabel: getEdgeAutoLabel(edge, nodes),
+          lastPreview: getNodeOutputPreview(workflowRun, edge.source, outputPort.id),
+        };
+      }),
+    };
+  });
+}
+
+function getConnectedNodeIds(selectedNode: BuilderNode | undefined, edges: BuilderEdge[]) {
+  if (!selectedNode) {
+    return new Set<string>();
+  }
+  const connected = new Set<string>([selectedNode.id]);
+  for (const edge of edges) {
+    if (edge.source === selectedNode.id) {
+      connected.add(edge.target);
+    }
+    if (edge.target === selectedNode.id) {
+      connected.add(edge.source);
+    }
+  }
+  return connected;
+}
+
+function getEdgeInspection(edge: BuilderEdge, nodes: BuilderNode[], workflowRun: WorkflowRunRecord | null) {
+  const sourceNode = getBuilderNode(nodes, edge.source);
+  const targetNode = getBuilderNode(nodes, edge.target);
+  const sourcePortId = handlePortId(edge.sourceHandle, "output");
+  const targetPortId = handlePortId(edge.targetHandle, "input");
+  const sourcePort = getNodePort(sourceNode, "output", sourcePortId);
+  const targetPort = getNodePort(targetNode, "input", targetPortId);
+  return {
+    sourceNode,
+    targetNode,
+    sourcePortId,
+    targetPortId,
+    sourcePort,
+    targetPort,
+    label: getEdgeAutoLabel(edge, nodes),
+    dataTypes: sourcePort?.dataTypes || [],
+    compatible: sourcePort && targetPort ? arePortTypesCompatible(sourcePort.dataTypes, targetPort.dataTypes) : false,
+    lastPreview: getNodeOutputPreview(workflowRun, edge.source, sourcePortId),
+  };
+}
+
 function getNodeStatusBadges(
   node: BuilderNode,
   edges: BuilderEdge[],
@@ -642,9 +896,13 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const [sessionId, setSessionId] = useState("starter-session");
   const [userId, setUserId] = useState("local-user");
   const [nodeSearch, setNodeSearch] = useState("");
+  const [paletteSearch, setPaletteSearch] = useState("");
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<"config" | "runtime" | "test" | "fixes" | "run" | "tools">("config");
+  const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const [commandSearch, setCommandSearch] = useState("");
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [inspectorTab, setInspectorTab] = useState<"flow" | "config" | "runtime" | "test" | "fixes" | "run" | "tools">("config");
   const [isPreRunOpen, setIsPreRunOpen] = useState(false);
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
@@ -662,9 +920,21 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
 
   const selectedNode = nodes.find((node) => node.selected) as BuilderNode | undefined;
+  const selectedEdge = selectedEdgeId
+    ? (edges.find((edge) => edge.id === selectedEdgeId) as BuilderEdge | undefined)
+    : (edges.find((edge) => edge.selected) as BuilderEdge | undefined);
   const selectedDefinition = selectedNode
     ? getBlockDefinition(selectedNode.data.blockType)
     : undefined;
+  const nodeInputMappings = selectedNode
+    ? buildNodeInputMappings(selectedNode, nodes as BuilderNode[], edges as BuilderEdge[], lastRun)
+    : [];
+  const nodeOutputMappings = selectedNode
+    ? buildNodeOutputMappings(selectedNode, nodes as BuilderNode[], edges as BuilderEdge[], lastRun)
+    : [];
+  const selectedEdgeInspection = selectedEdge
+    ? getEdgeInspection(selectedEdge, nodes as BuilderNode[], lastRun)
+    : null;
 
   function setGraph(graph: BuilderGraph) {
     const hydratedGraph = hydrateGraph(graph);
@@ -683,14 +953,23 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     edges as BuilderEdge[],
     runtimeInputs,
   );
-  const isCurrentChatWorkflow = isChatWorkflow(toBuilderGraph(nodes, edges));
+  const currentGraph = toBuilderGraph(nodes, edges);
+  const isCurrentChatWorkflow = isChatWorkflow(currentGraph);
   const blockerCount = diagnostics.filter((item) => item.level === "error").length;
-  const workflowModeLabel = isCurrentChatWorkflow ? "Chatbot workflow" : "Builder/document workflow";
+  const workflowModeLabel = getBuilderWorkflowModeLabel(currentGraph);
   const runDisplayCards = getRunDisplayCards(lastRun, nodes);
+  const connectedNodeIds = getConnectedNodeIds(selectedNode, edges as BuilderEdge[]);
   const flowNodesWithBadges = nodes.map((node) => {
     const builderNode = node as BuilderNode;
+    const isConnectedToSelection = connectedNodeIds.has(node.id);
+    const dimUnrelated = selectedNode && connectedNodeIds.size > 1 && !isConnectedToSelection;
     return {
       ...node,
+      style: {
+        ...(node.style || {}),
+        opacity: dimUnrelated ? 0.42 : 1,
+        filter: dimUnrelated ? "grayscale(0.35)" : undefined,
+      },
       data: {
         ...builderNode.data,
         statusBadges: getNodeStatusBadges(builderNode, edges as BuilderEdge[], runtimeInputs, lastRun),
@@ -698,10 +977,22 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       },
     };
   });
+  const flowEdgesWithLabels = decorateFlowEdges(edges, nodes as BuilderNode[], selectedEdge?.id || null, selectedNode?.id);
+  const filteredPaletteGroups = paletteGroups
+    .map((group) => ({
+      ...group,
+      blocks: group.blocks.filter((definition) => {
+        const query = paletteSearch.trim().toLowerCase();
+        if (!query) return true;
+        return `${definition.title} ${definition.type} ${definition.category} ${definition.description}`.toLowerCase().includes(query);
+      }),
+    }))
+    .filter((group) => group.blocks.length > 0);
   const connectionSuggestions = selectedNode
     ? getConnectionSuggestions(selectedNode, nodes as BuilderNode[], edges as BuilderEdge[])
     : [];
   const inspectorTabs = [
+    { id: "flow", label: "Flow", hint: "Data mapping" },
     { id: "config", label: "Config", hint: "Schema settings" },
     { id: "runtime", label: "Inputs", hint: "Files and values" },
     { id: "test", label: "Test", hint: "Node previews" },
@@ -776,18 +1067,54 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) {
         return;
       }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setIsCommandOpen((current) => !current);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void openSaveDialog();
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        startRunWorkflow();
+        return;
+      }
+      if (event.key === "Escape") {
+        setIsCommandOpen(false);
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        if (selectedEdge) {
+          event.preventDefault();
+          deleteSelectedEdge();
+        } else if (selectedNode) {
+          event.preventDefault();
+          deleteSelectedNode();
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === "d" && selectedNode) {
+        event.preventDefault();
+        duplicateSelectedNode();
+        return;
+      }
       if (event.key.toLowerCase() === "f") {
         event.preventDefault();
         zoomToFit();
+        return;
       }
       if (event.key.toLowerCase() === "l") {
         event.preventDefault();
         autoLayout();
+        return;
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  }, [selectedEdge, selectedNode, nodes, edges]);
 
   async function persistWorkflow(graph: BuilderGraph) {
     if (persistedWorkflowId) {
@@ -1042,7 +1369,9 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     }
     const graph = toBuilderGraph(nodes, edges);
     if (!isChatWorkflow(graph)) {
-      setStatusMessage("Only workflows with Chat Input and Chat Output can publish a chat URL. Document workflows should be run in the builder.");
+      setStatusMessage(
+        "This workflow needs the app runner because it has file/document/dashboard inputs. Use Run Current Graph here or share its /app workflow URL.",
+      );
       return;
     }
     setIsRunning(true);
@@ -1068,15 +1397,29 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   }
 
   function onNodeClick(_: React.MouseEvent, node: Node) {
+    setSelectedEdgeId(null);
     setNodes((currentNodes) =>
       currentNodes.map((item) => ({ ...item, selected: item.id === node.id })),
     );
     setIsInspectorOpen(true);
-    setInspectorTab("config");
+    setInspectorTab("flow");
   }
 
   function onEdgesChange(changes: EdgeChange[]) {
     setEdges((currentEdges) => applyEdgeChanges(changes, currentEdges));
+  }
+
+  function onEdgeClick(_: React.MouseEvent, edge: Edge) {
+    setSelectedEdgeId(edge.id);
+    setNodes((currentNodes) => currentNodes.map((item) => ({ ...item, selected: false })));
+    setEdges((currentEdges) => currentEdges.map((item) => ({ ...item, selected: item.id === edge.id })));
+    setIsInspectorOpen(true);
+    setInspectorTab("flow");
+    setStatusMessage(`Inspecting data flow: ${getEdgeAutoLabel(edge as BuilderEdge, nodes as BuilderNode[])}.`);
+  }
+
+  function onPaneClick() {
+    setSelectedEdgeId(null);
   }
 
   function isValidConnection(connection: Connection) {
@@ -1771,6 +2114,56 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     setStatusMessage(`${selectedNode.data.label} removed.`);
   }
 
+  function duplicateSelectedNode() {
+    if (!selectedNode) {
+      setStatusMessage("Select a node before duplicating.");
+      return;
+    }
+    const duplicatedNode: Node = {
+      ...selectedNode,
+      id: `${selectedNode.data.blockType}-${Date.now()}`,
+      position: {
+        x: selectedNode.position.x + 56,
+        y: selectedNode.position.y + 56,
+      },
+      selected: true,
+      data: {
+        ...selectedNode.data,
+        label: `${selectedNode.data.label} copy`,
+        config: { ...selectedNode.data.config },
+      },
+    };
+    setSelectedEdgeId(null);
+    setNodes((currentNodes) =>
+      [
+        ...currentNodes.map((node) => ({ ...node, selected: false })),
+        duplicatedNode,
+      ],
+    );
+    setIsInspectorOpen(true);
+    setInspectorTab("flow");
+    setStatusMessage(`${selectedNode.data.label} duplicated. Connect its ports when ready.`);
+  }
+
+  function deleteSelectedEdge() {
+    if (!selectedEdge) {
+      setStatusMessage("Select a connection before deleting.");
+      return;
+    }
+    const edgeLabel = getEdgeAutoLabel(selectedEdge, nodes as BuilderNode[]);
+    setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== selectedEdge.id));
+    setSelectedEdgeId(null);
+    setStatusMessage(`Removed connection: ${edgeLabel}.`);
+  }
+
+  function selectFlowEndpoint(nodeId: string) {
+    setSelectedEdgeId(null);
+    setNodes((currentNodes) => currentNodes.map((node) => ({ ...node, selected: node.id === nodeId })));
+    setEdges((currentEdges) => currentEdges.map((edge) => ({ ...edge, selected: false })));
+    setIsInspectorOpen(true);
+    setInspectorTab("flow");
+  }
+
   function zoomToFit() {
     reactFlowInstance?.fitView({ padding: 0.18, duration: 350 });
   }
@@ -1896,6 +2289,60 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   }
 
   const preRunChecklist = isPreRunOpen ? buildPreRunChecklist() : null;
+  const commandActions = [
+    {
+      title: "Run workflow",
+      hint: "Validate inputs and execute with live updates",
+      shortcut: "⌘ Enter",
+      action: () => startRunWorkflow(),
+    },
+    {
+      title: "Save version",
+      hint: "Open save dialog with required comment",
+      shortcut: "⌘ S",
+      action: () => void openSaveDialog(),
+    },
+    {
+      title: "Open block palette",
+      hint: "Browse and add workflow blocks",
+      shortcut: "Blocks",
+      action: () => setIsPaletteOpen(true),
+    },
+    {
+      title: "Open inspector",
+      hint: "Inspect selected node or connection",
+      shortcut: "Inspect",
+      action: () => setIsInspectorOpen(true),
+    },
+    {
+      title: "Auto-layout graph",
+      hint: "Reposition blocks into readable columns",
+      shortcut: "L",
+      action: () => autoLayout(),
+    },
+    {
+      title: "Zoom to fit",
+      hint: "Fit the full workflow on screen",
+      shortcut: "F",
+      action: () => zoomToFit(),
+    },
+    {
+      title: "Duplicate selected node",
+      hint: selectedNode ? `Duplicate ${selectedNode.data.label}` : "Select a node first",
+      shortcut: "D",
+      action: () => duplicateSelectedNode(),
+    },
+    {
+      title: "Delete selected item",
+      hint: selectedEdge ? "Remove selected connection" : selectedNode ? `Remove ${selectedNode.data.label}` : "Select a node or connection first",
+      shortcut: "Delete",
+      action: () => (selectedEdge ? deleteSelectedEdge() : deleteSelectedNode()),
+    },
+  ].filter((command) => {
+    const query = commandSearch.trim().toLowerCase();
+    if (!query) return true;
+    return `${command.title} ${command.hint} ${command.shortcut}`.toLowerCase().includes(query);
+  });
 
   return (
     <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(182,255,135,0.48),_transparent_24%),radial-gradient(circle_at_70%_12%,_rgba(255,143,112,0.22),_transparent_18%),radial-gradient(circle_at_bottom_right,_rgba(126,211,255,0.42),_transparent_26%),linear-gradient(135deg,_#f5fbf7_0%,_#f4eee2_46%,_#fffaf5_100%)] text-ink">
@@ -1961,6 +2408,67 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
           />
         ) : null}
 
+        {isCommandOpen ? (
+          <div className="absolute inset-0 z-50 grid place-items-start bg-ink/20 px-4 pt-24 backdrop-blur-sm">
+            <div className="mx-auto w-full max-w-2xl overflow-hidden rounded-[1.5rem] border border-white/70 bg-white/95 shadow-panel">
+              <div className="border-b border-ink/8 p-4">
+                <div className="flex items-center gap-3">
+                  <Keyboard className="h-5 w-5 text-ink/60" aria-hidden />
+                  <input
+                    autoFocus
+                    value={commandSearch}
+                    onChange={(event) => setCommandSearch(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        setIsCommandOpen(false);
+                      }
+                      if (event.key === "Enter" && commandActions[0]) {
+                        commandActions[0].action();
+                        setIsCommandOpen(false);
+                      }
+                    }}
+                    placeholder="Search commands: run, save, duplicate, layout..."
+                    className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-ink outline-none placeholder:text-ink/35"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setIsCommandOpen(false)}
+                    className="rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink"
+                  >
+                    Esc
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-[55vh] overflow-auto p-2">
+                {commandActions.map((command) => (
+                  <button
+                    key={command.title}
+                    type="button"
+                    onClick={() => {
+                      command.action();
+                      setIsCommandOpen(false);
+                    }}
+                    className="flex w-full items-center justify-between gap-3 rounded-2xl px-3 py-3 text-left transition hover:bg-mist/80"
+                  >
+                    <span>
+                      <span className="block text-sm font-bold text-ink">{command.title}</span>
+                      <span className="mt-0.5 block text-xs text-ink/55">{command.hint}</span>
+                    </span>
+                    <span className="shrink-0 rounded-full bg-ink px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">
+                      {command.shortcut}
+                    </span>
+                  </button>
+                ))}
+                {!commandActions.length ? (
+                  <p className="rounded-2xl bg-mist/70 px-4 py-5 text-sm font-semibold text-ink/55">
+                    No commands found.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <section className="relative h-full">
           <aside className={`absolute bottom-4 left-4 top-4 z-40 w-[min(300px,calc(100vw-2rem))] overflow-auto rounded-[1.35rem] border border-white/70 bg-white/90 p-2.5 shadow-panel backdrop-blur transition-transform duration-300 ${isPaletteOpen ? "translate-x-0" : "-translate-x-[115%]"}`}>
             <div className="mb-2 flex items-start justify-between gap-3">
@@ -1978,8 +2486,20 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               </button>
             </div>
 
+            <div className="mb-3 rounded-2xl bg-mist/75 p-2">
+              <div className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 ring-1 ring-ink/6">
+                <Search className="h-3.5 w-3.5 text-ink/45" aria-hidden />
+                <input
+                  value={paletteSearch}
+                  onChange={(event) => setPaletteSearch(event.target.value)}
+                  placeholder="Search blocks by job, type, output..."
+                  className="min-w-0 flex-1 bg-transparent text-xs font-semibold text-ink outline-none placeholder:text-ink/35"
+                />
+              </div>
+            </div>
+
             <div className="max-h-[78vh] space-y-3 overflow-auto pr-1">
-              {paletteGroups.map((group) => (
+              {filteredPaletteGroups.map((group) => (
                 <section key={group.category}>
                   <div className="mb-2 flex items-center justify-between">
                     <h3 className="text-sm font-semibold uppercase tracking-[0.3em] text-ink/45">
@@ -1988,7 +2508,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                     <span className="text-xs text-ink/45">{group.blocks.length}</span>
                   </div>
                   <div className="grid gap-2">
-                    {group.blocks.map((definition) => (
+                      {group.blocks.map((definition) => (
                       <button
                         key={definition.type}
                         type="button"
@@ -2044,6 +2564,11 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   </div>
                 </section>
               ))}
+              {!filteredPaletteGroups.length ? (
+                <p className="rounded-2xl bg-white px-3 py-5 text-center text-xs font-semibold text-ink/55">
+                  No blocks match that search.
+                </p>
+              ) : null}
             </div>
           </aside>
 
@@ -2069,10 +2594,12 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                 fitViewOptions={{ padding: 0.18, maxZoom: 0.92 }}
                 defaultViewport={{ x: 0, y: 0, zoom: 0.78 }}
                 nodes={flowNodesWithBadges}
-                edges={edges}
+                edges={flowEdgesWithLabels}
                 onNodesChange={onNodesChange}
                 onNodeClick={onNodeClick}
                 onEdgesChange={onEdgesChange}
+                onEdgeClick={onEdgeClick}
+                onPaneClick={onPaneClick}
                 onConnect={onConnect}
                 isValidConnection={isValidConnection}
                 onInit={setReactFlowInstance}
@@ -2083,12 +2610,6 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               >
                 <Background color="#d5ded5" gap={18} />
                 <Controls />
-                <MiniMap
-                  pannable
-                  zoomable
-                  nodeColor={(node) => String((node.data as BuilderNode["data"]).accentColor ?? "#dbe4db")}
-                  maskColor="rgba(8, 16, 24, 0.08)"
-                />
                 <Panel position="bottom-center">
                   <div className="flex flex-wrap items-center gap-1.5 rounded-full border border-ink/10 bg-white/95 px-2.5 py-2 shadow-panel">
                     <input
@@ -2126,7 +2647,9 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                     Builder Inspector
                   </p>
                   <h2 className="mt-1 text-lg font-semibold">
-                    {selectedDefinition?.title ?? "Workflow Control"}
+                    {selectedEdgeInspection && inspectorTab === "flow"
+                      ? "Data Flow"
+                      : selectedDefinition?.title ?? "Workflow Control"}
                   </h2>
                   <p className="mt-1 text-xs leading-5 text-ink/58">
                     {inspectorTabs.find((tab) => tab.id === inspectorTab)?.hint}
@@ -2155,6 +2678,88 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
             </div>
 
             <div className="min-h-0 flex-1 overflow-auto p-3">
+              {selectedEdge && selectedEdgeInspection && inspectorTab === "flow" ? (
+                <div className="mb-4 space-y-3 rounded-[1.6rem] border border-ink/8 bg-white p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-ink/38">Data Flow Inspector</p>
+                      <h3 className="mt-1 text-lg font-semibold text-ink">{selectedEdgeInspection.label}</h3>
+                      <p className="mt-1 text-xs leading-5 text-ink/58">
+                        This edge decides which output payload is passed into which input port during DAG execution.
+                      </p>
+                    </div>
+                    <span className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${selectedEdgeInspection.compatible ? "bg-lime/35 text-ink" : "bg-coral/20 text-ink"}`}>
+                      {selectedEdgeInspection.compatible ? "Compatible" : "Check ports"}
+                    </span>
+                  </div>
+
+                  <div className="grid gap-2">
+                    <div className="rounded-2xl bg-mist/70 p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-ink/42">Source</p>
+                      <p className="mt-1 text-sm font-semibold text-ink">
+                        {selectedEdgeInspection.sourceNode?.data.label || selectedEdge.source}
+                      </p>
+                      <p className="mt-1 text-xs text-ink/58">
+                        Output port: <strong>{selectedEdgeInspection.sourcePort?.label || selectedEdgeInspection.sourcePortId}</strong>
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-mist/70 p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-ink/42">Target</p>
+                      <p className="mt-1 text-sm font-semibold text-ink">
+                        {selectedEdgeInspection.targetNode?.data.label || selectedEdge.target}
+                      </p>
+                      <p className="mt-1 text-xs text-ink/58">
+                        Input port: <strong>{selectedEdgeInspection.targetPort?.label || selectedEdgeInspection.targetPortId}</strong>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => selectFlowEndpoint(selectedEdge.source)}
+                      className="rounded-2xl bg-white px-3 py-2 text-xs font-bold text-ink ring-1 ring-ink/8"
+                    >
+                      Select source
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectFlowEndpoint(selectedEdge.target)}
+                      className="rounded-2xl bg-white px-3 py-2 text-xs font-bold text-ink ring-1 ring-ink/8"
+                    >
+                      Select target
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deleteSelectedEdge}
+                      className="rounded-2xl bg-coral/15 px-3 py-2 text-xs font-bold text-ink ring-1 ring-coral/25"
+                    >
+                      Remove link
+                    </button>
+                  </div>
+
+                  <div className="rounded-2xl bg-ink p-3 text-white">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-white/45">Payload Shape</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(selectedEdgeInspection.dataTypes.length ? selectedEdgeInspection.dataTypes : ["unknown"]).map((type) => (
+                        <span key={type} className="rounded-full bg-white/12 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white/80">
+                          {type}
+                        </span>
+                      ))}
+                    </div>
+                    <p className="mt-3 text-xs leading-5 text-white/70">
+                      Executor reads <strong>{selectedEdgeInspection.sourcePortId}</strong> from the source output and appends it to <strong>{selectedEdgeInspection.targetPortId}</strong> on the target input.
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl bg-lime/20 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-ink/42">Last Run Preview</p>
+                    <p className="mt-1 text-xs leading-5 text-ink/70">
+                      {selectedEdgeInspection.lastPreview || "Run the workflow once to see the actual payload preview that crossed this edge."}
+                    </p>
+                  </div>
+                </div>
+              ) : null}
 
             {selectedNode && selectedDefinition ? (
               <div className="space-y-5">
@@ -2176,6 +2781,151 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   <p className="mt-3 text-sm leading-6 text-white/85">
                     {selectedDefinition.description}
                   </p>
+                </div>
+
+                <div className={`rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "flow" ? "" : "hidden"}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">Node Input Mapping</p>
+                      <p className="mt-1 text-xs leading-5 text-ink/55">
+                        This shows exactly which upstream outputs feed each input on this block.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-mist px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-ink/55">
+                      {nodeInputMappings.reduce((total, item) => total + item.sources.length, 0)} source(s)
+                    </span>
+                  </div>
+
+                  {nodeInputMappings.length ? (
+                    <div className="mt-3 space-y-3">
+                      {nodeInputMappings.map((mapping) => (
+                        <div key={mapping.inputPortId} className="rounded-2xl border border-ink/8 bg-mist/55 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-bold text-ink">
+                                Input: {mapping.inputLabel}
+                                {mapping.required ? <span className="ml-1 text-coral">required</span> : null}
+                              </p>
+                              <p className="mt-1 text-[11px] text-ink/52">
+                                Accepts {mapping.inputTypes.join(", ") || "any"} payloads
+                              </p>
+                            </div>
+                            <span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${mapping.sources.length ? "bg-lime/35 text-ink" : mapping.required ? "bg-coral/20 text-ink" : "bg-white text-ink/50"}`}>
+                              {mapping.sources.length ? `${mapping.sources.length} wired` : "empty"}
+                            </span>
+                          </div>
+
+                          {mapping.sources.length ? (
+                            <div className="mt-3 space-y-2">
+                              {mapping.sources.map((source) => (
+                                <button
+                                  key={source.edgeId}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedEdgeId(source.edgeId);
+                                    setEdges((currentEdges) => currentEdges.map((edge) => ({ ...edge, selected: edge.id === source.edgeId })));
+                                  }}
+                                  className="w-full rounded-xl bg-white px-3 py-2 text-left text-xs transition hover:bg-lime/20"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <strong className="truncate text-ink">{source.sourceNodeLabel}</strong>
+                                    <span className="shrink-0 rounded-full bg-ink px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-white">
+                                      {source.sourcePortLabel}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-[11px] leading-4 text-ink/55">
+                                    {source.edgeLabel} · {source.sourceTypes.join(", ") || "unknown"}
+                                  </p>
+                                  <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-ink/62">
+                                    {source.lastPreview || "No run preview yet."}
+                                  </p>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="mt-3 rounded-xl bg-white px-3 py-2 text-xs leading-5 text-ink/55">
+                              No upstream output is mapped here yet. Connect a compatible output port to this input.
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-3 rounded-2xl bg-mist/70 px-3 py-3 text-xs leading-5 text-ink/62">
+                      This is a source/runtime block. It starts data flow instead of receiving upstream input.
+                    </p>
+                  )}
+                </div>
+
+                <div className={`rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "flow" ? "" : "hidden"}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">Where This Block Sends Data</p>
+                      <p className="mt-1 text-xs leading-5 text-ink/55">
+                        Outgoing mappings show which downstream blocks consume each output.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-mist px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-ink/55">
+                      {nodeOutputMappings.reduce((total, item) => total + item.targets.length, 0)} target(s)
+                    </span>
+                  </div>
+
+                  {nodeOutputMappings.length ? (
+                    <div className="mt-3 space-y-3">
+                      {nodeOutputMappings.map((mapping) => (
+                        <div key={mapping.outputPortId} className="rounded-2xl border border-ink/8 bg-white p-3 shadow-sm">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-bold text-ink">Output: {mapping.outputLabel}</p>
+                              <p className="mt-1 text-[11px] text-ink/52">
+                                Emits {mapping.outputTypes.join(", ") || "any"} payloads
+                              </p>
+                            </div>
+                            <span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${mapping.targets.length ? "bg-lime/35 text-ink" : "bg-mist text-ink/50"}`}>
+                              {mapping.targets.length ? `${mapping.targets.length} used` : "unused"}
+                            </span>
+                          </div>
+
+                          {mapping.targets.length ? (
+                            <div className="mt-3 space-y-2">
+                              {mapping.targets.map((target) => (
+                                <button
+                                  key={target.edgeId}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedEdgeId(target.edgeId);
+                                    setEdges((currentEdges) => currentEdges.map((edge) => ({ ...edge, selected: edge.id === target.edgeId })));
+                                  }}
+                                  className="w-full rounded-xl bg-mist/65 px-3 py-2 text-left text-xs transition hover:bg-lime/20"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <strong className="truncate text-ink">{target.targetNodeLabel}</strong>
+                                    <span className="shrink-0 rounded-full bg-ink px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-white">
+                                      {target.targetPortLabel}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-[11px] leading-4 text-ink/55">
+                                    {target.edgeLabel} · {target.targetTypes.join(", ") || "unknown"}
+                                  </p>
+                                  <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-ink/62">
+                                    {target.lastPreview || "No run preview yet."}
+                                  </p>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="mt-3 rounded-xl bg-mist/65 px-3 py-2 text-xs leading-5 text-ink/55">
+                              This output is not connected yet. Add an output block or downstream processor if this result should be used.
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-3 rounded-2xl bg-mist/70 px-3 py-3 text-xs leading-5 text-ink/62">
+                      This is a terminal/output block. It consumes data and ends a visible branch.
+                    </p>
+                  )}
                 </div>
 
                 <div className={`rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "config" ? "" : "hidden"}`}>
@@ -2718,8 +3468,12 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                   disabled={isRunning || !isCurrentChatWorkflow}
                   className="rounded-2xl bg-ink px-4 py-3 text-left text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Publish Chatbot
-                  <span className="mt-1 block text-xs font-normal text-white/65">Creates /chat URL for Chat Input + Chat Output workflows.</span>
+                  {isCurrentChatWorkflow ? "Publish Chatbot" : "Chat URL unavailable"}
+                  <span className="mt-1 block text-xs font-normal text-white/65">
+                    {isCurrentChatWorkflow
+                      ? "Creates /chat URL for chat-only or pre-ingested RAG chat workflows."
+                      : "Runtime file/document workflows should be shared with the /app URL so users can upload files and view outputs."}
+                  </span>
                 </button>
                 {[
                   { label: "Publish API Endpoint", detail: "Use the Publish tab to copy the local chat API endpoint and request snippet." },

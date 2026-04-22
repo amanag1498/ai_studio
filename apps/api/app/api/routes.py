@@ -51,7 +51,7 @@ from app.schemas.workflows import (
 from app.services.admin import get_usage_dashboard
 from app.services.auth import create_local_session_token, create_local_user, login_local_user
 from app.services.execution import ExecutionContext, TypedPayload, execute_node, execute_workflow, get_run_or_404, typed_payload
-from app.services.execution_queue import enqueue_workflow_execution
+from app.services.execution_queue import cancel_workflow_run, enqueue_workflow_execution, queue_snapshot
 from app.services.files import persist_library_upload, persist_runtime_upload
 from app.services.observability import audit_event, evaluate_rag_result, get_observability_dashboard
 from app.services.parsers import parse_uploaded_file
@@ -96,6 +96,8 @@ def ensure_workflow_access(
     required_role: str = "viewer",
 ) -> None:
     if current_user_id is None:
+        if settings.app_env.lower() == "production":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication is required.")
         return
     if workflow.created_by_user_id in {None, current_user_id} or workflow.updated_by_user_id == current_user_id:
         return
@@ -1442,6 +1444,66 @@ def list_workflow_runs_route(
         )
     )
     return [WorkflowRunRead.model_validate(run) for run in runs]
+
+
+@router.post("/workflows/{workflow_id}/runs/{run_id}/cancel", response_model=WorkflowRunRead, tags=["execution"])
+def cancel_workflow_run_route(
+    workflow_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> WorkflowRunRead:
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    workflow_run = get_run_or_404(db, workflow_id, run_id)
+    if workflow_run.status in {"completed", "failed", "cancelled"}:
+        return WorkflowRunRead.model_validate(workflow_run)
+    cancel_workflow_run(run_id)
+    audit_event(
+        db,
+        action="workflow_execution_cancelled",
+        workflow_id=workflow_id,
+        workflow_run_id=run_id,
+        user_id=current_user_id,
+        metadata={"previous_status": workflow_run.status},
+    )
+    db.commit()
+    db.refresh(workflow_run)
+    return WorkflowRunRead.model_validate(get_run_or_404(db, workflow_id, run_id))
+
+
+@router.get("/execution/queue", tags=["execution"])
+def get_execution_queue_route(
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+    if settings.app_env.lower() == "production" and current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication is required.")
+    if current_user is not None and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access is required.")
+    snapshot = queue_snapshot()
+    queued_runs = list(
+        db.scalars(
+            select(WorkflowRun)
+            .where(WorkflowRun.status.in_(["queued", "running"]))
+            .order_by(WorkflowRun.id.desc())
+            .limit(25)
+        )
+    )
+    return {
+        **snapshot,
+        "durable_runs": [
+            {
+                "id": run.id,
+                "workflow_id": run.workflow_id,
+                "status": run.status,
+                "trigger_mode": run.trigger_mode,
+                "started_at": run.started_at,
+                "owner_user_id": run.owner_user_id,
+            }
+            for run in queued_runs
+        ],
+    }
 
 
 @router.get("/workflows/{workflow_id}/runs/{run_id}/events", tags=["execution"])
