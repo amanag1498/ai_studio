@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
@@ -24,6 +24,7 @@ from app.models.workflow import (
     WorkflowChangeEvent,
     WorkflowComment,
     WorkflowPermission,
+    WorkflowPresence,
     WorkflowRun,
     WorkflowSubflow,
     WorkflowVersion,
@@ -515,6 +516,7 @@ def system_health_details() -> dict:
             "embedding_model": settings.embedding_model,
             "vector_backend": settings.vector_backend,
             "telemetry_enabled": str(settings.telemetry_enabled),
+            "telemetry_console_exporter_enabled": str(settings.telemetry_console_exporter_enabled),
             "telemetry_service_name": settings.telemetry_service_name,
         },
     }
@@ -1218,10 +1220,134 @@ def workflow_history_route(
     ]
 
 
+def serialize_presence(item: WorkflowPresence) -> dict:
+    return {
+        "id": item.id,
+        "workflow_id": item.workflow_id,
+        "user_id": item.user_id,
+        "session_id": item.session_id,
+        "display_name": item.display_name,
+        "node_id": item.node_id,
+        "cursor": item.cursor_json,
+        "graph_version": item.graph_version,
+        "last_seen_at": item.last_seen_at,
+        "created_at": item.created_at,
+    }
+
+
+@router.get("/workflows/{workflow_id}/collaboration/state", tags=["collaboration"])
+def workflow_collaboration_state_route(
+    workflow_id: int,
+    session_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id)
+    active_since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=45)
+    stale_before = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=10)
+    db.execute(delete(WorkflowPresence).where(WorkflowPresence.last_seen_at < stale_before))
+    presence = list(
+        db.scalars(
+            select(WorkflowPresence)
+            .where(
+                WorkflowPresence.workflow_id == workflow_id,
+                WorkflowPresence.last_seen_at >= active_since,
+            )
+            .order_by(WorkflowPresence.last_seen_at.desc())
+        )
+    )
+    db.commit()
+    return {
+        "workflow_id": workflow.id,
+        "current_version": workflow.current_version,
+        "latest_saved_version": workflow.latest_saved_version,
+        "updated_at": workflow.updated_at,
+        "active_presence": [
+            serialize_presence(item)
+            for item in presence
+            if not session_id or item.session_id != session_id
+        ],
+    }
+
+
+@router.post("/workflows/{workflow_id}/collaboration/presence", tags=["collaboration"])
+def update_workflow_presence_route(
+    workflow_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    get_authorized_workflow(db, workflow_id, current_user_id)
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="session_id is required.")
+    user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+    presence = db.scalar(
+        select(WorkflowPresence).where(
+            WorkflowPresence.workflow_id == workflow_id,
+            WorkflowPresence.session_id == session_id,
+        )
+    )
+    if presence is None:
+        presence = WorkflowPresence(workflow_id=workflow_id, session_id=session_id)
+    presence.user_id = current_user_id
+    display_name = payload.get("display_name") or (user.display_name if user else None) or "Local collaborator"
+    presence.display_name = str(display_name)
+    presence.node_id = payload.get("node_id")
+    presence.cursor_json = dict(payload.get("cursor") or {})
+    graph_version = payload.get("graph_version")
+    presence.graph_version = int(graph_version) if graph_version not in (None, "") else None
+    presence.last_seen_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.add(presence)
+    db.commit()
+    db.refresh(presence)
+    return serialize_presence(presence)
+
+
+@router.post("/workflows/{workflow_id}/collaboration/conflicts/check", tags=["collaboration"])
+def check_workflow_conflicts_route(
+    workflow_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> dict:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id)
+    client_version = payload.get("base_version")
+    client_updated_at = payload.get("base_updated_at")
+    has_version_conflict = client_version not in (None, "") and int(client_version) != workflow.current_version
+    has_timestamp_conflict = bool(client_updated_at and str(client_updated_at) != workflow.updated_at.isoformat())
+    active_since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=45)
+    active_editors = list(
+        db.scalars(
+            select(WorkflowPresence).where(
+                WorkflowPresence.workflow_id == workflow_id,
+                WorkflowPresence.last_seen_at >= active_since,
+            )
+        )
+    )
+    return {
+        "workflow_id": workflow.id,
+        "has_conflict": has_version_conflict or has_timestamp_conflict,
+        "server_version": workflow.current_version,
+        "server_updated_at": workflow.updated_at,
+        "client_version": client_version,
+        "client_updated_at": client_updated_at,
+        "active_presence": [serialize_presence(item) for item in active_editors],
+        "resolution": "reload_or_save_as_new_version" if has_version_conflict or has_timestamp_conflict else "safe_to_save",
+    }
+
+
 @router.get("/subflows", tags=["collaboration"])
 def list_subflows_route(db: Session = Depends(get_db)) -> list[dict]:
     return [
-        {"id": subflow.id, "workflow_id": subflow.workflow_id, "name": subflow.name, "description": subflow.description, "graph_json": subflow.graph_json, "created_at": subflow.created_at}
+        {
+            "id": subflow.id,
+            "workflow_id": subflow.workflow_id,
+            "name": subflow.name,
+            "description": subflow.description,
+            "graph_json": subflow.graph_json,
+            "created_at": subflow.created_at,
+        }
         for subflow in db.scalars(select(WorkflowSubflow).order_by(WorkflowSubflow.created_at.desc()).limit(100))
     ]
 
@@ -1245,7 +1371,14 @@ def create_subflow_route(
     audit_event(db, action="subflow_created", workflow_id=workflow_id, user_id=current_user_id, resource_type="subflow", metadata={"name": subflow.name})
     db.commit()
     db.refresh(subflow)
-    return {"id": subflow.id, "name": subflow.name, "workflow_id": subflow.workflow_id, "created_at": subflow.created_at}
+    return {
+        "id": subflow.id,
+        "name": subflow.name,
+        "description": subflow.description,
+        "workflow_id": subflow.workflow_id,
+        "graph_json": subflow.graph_json,
+        "created_at": subflow.created_at,
+    }
 
 
 @router.post("/workflows/{workflow_id}/nodes/{node_id}/test", tags=["execution"])

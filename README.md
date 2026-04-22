@@ -4,7 +4,7 @@ AI Studio is a local-first visual workflow builder for document, RAG, chatbot, e
 
 ## What It Can Do
 
-- Build workflows visually with React Flow, drag-and-drop blocks, compatible ports, node badges, config sheets, minimap, controls, auto-layout, search, copy/paste-style actions, and polished full-canvas builder UI.
+- Build workflows visually with React Flow, drag-and-drop blocks, compatible ports, node badges, config sheets, controls, auto-layout, search, component selection mode, reusable subflow insertion, and polished full-canvas builder UI.
 - Run workflows as shareable local app pages at `/app/:workflowId` with file upload forms, text/chat inputs, pre-run checklist, execution timeline, and user-friendly dashboard output cards.
 - Persist workflows, versions, normalized nodes/edges, graph JSON snapshots, runs, node runs, latency, errors, logs, files, documents, chunks, users, auth events, memory, and permissions in SQLite.
 - Upload and parse PDF, DOCX, TXT, CSV, and JSON files, with OCR available through the local parser abstraction when Tesseract is installed.
@@ -18,7 +18,7 @@ AI Studio is a local-first visual workflow builder for document, RAG, chatbot, e
 - Track local users, signup/login activity, workflow ownership, run ownership, usage stats, audit logs, published endpoints, and workflow permissions.
 - Stream workflow execution updates through the async run queue and Server-Sent Events, with queue monitoring, cancellation, durable SQLite run state, and configurable retries/backoff.
 - Upload documents into a global File Library before building/running workflows, then reuse those files in Builder and App Run file inputs.
-- Add workflow comments, inspect change history, and save reusable subflow/components from workflow Activity panels.
+- Add workflow comments, inspect change history, and save reusable subflow/components from workflow Activity panels or directly from selected Builder blocks.
 - Export/import workflow bundles for review, sharing, or backup.
 
 ## Stack
@@ -123,7 +123,12 @@ DATABASE_QUERY_ALLOW_WRITES=false
 EXECUTION_QUEUE_MAX_WORKERS=3
 EXECUTION_QUEUE_MAX_RETRIES=1
 EXECUTION_QUEUE_RETRY_BACKOFF_SECONDS=1.5
+TELEMETRY_ENABLED=true
+TELEMETRY_CONSOLE_EXPORTER_ENABLED=false
+TELEMETRY_SERVICE_NAME=ai-studio-api
 ```
+
+`TELEMETRY_ENABLED=true` instruments the FastAPI app. Keep `TELEMETRY_CONSOLE_EXPORTER_ENABLED=false` for normal local development; set it to `true` only when you intentionally want raw OpenTelemetry spans printed in the backend terminal.
 
 Frontend env:
 
@@ -136,7 +141,7 @@ VITE_API_BASE_URL=http://localhost:8000
 ## Main Pages
 
 - `/`: AI Studio shell with workflow library, creation wizard, templates, usage dashboard, run history, publish manager, file library, knowledge manager, reusable components, block marketplace, health checks, bundle import/export, and account/login.
-- `/builder/:workflowId`: visual React Flow builder for editing and running workflows with tabbed inspector, version notes, no-change save guard, runtime file selection, block testing, fixes, publish controls, and RAG tools.
+- `/builder/:workflowId`: visual React Flow builder for editing and running workflows with tabbed inspector, version notes, no-change save guard, runtime file selection, block testing, fixes, publish controls, RAG tools, collaboration presence, conflict checks, and reusable component insertion.
 - `/app/:workflowId`: shareable local app UI for file/text/chat workflows, File Library selection, pre-run checklist, live execution timeline, and dashboard outputs.
 - `/runs/:workflowId/:runId`: clean run details page with logs, node outputs, errors, timings, and final results.
 - `/chat/:slug`: published chatbot session UI.
@@ -230,6 +235,17 @@ Block contracts are schema-driven in [packages/shared/src/blocks.ts](/Users/aman
 
 The block registry also includes placeholders/interfaces for Summarizer variants, Classifier variants, Intent Router, Publish API, Error Handler, Re-ranker, Research Agent, Human Approval, Guardrail, Access Control, and Long-Term Memory expansion. OCR, Web Search, Web Page Reader, SQL Assistant, Database Query, Email, and Notification now have first usable provider-backed implementations while preserving the same extension seams.
 
+## Builder Components
+
+Reusable components are saved subflows made from real workflow blocks.
+
+- Turn on `Select Blocks` in the Builder bottom toolbar, click the blocks you want to package, then choose `Save Component`.
+- The Components side sheet can also save the current selected blocks as a component.
+- `Insert Editable Blocks` places a saved component back onto the canvas as normal editable React Flow nodes.
+- Inserted component blocks are arranged as a compact overlapping cluster so they visually read as a grouped card stack while staying fully clickable, draggable, attachable, and executable.
+- Each inserted block receives component metadata and badges such as `component` and `group 1/N`.
+- This intentionally avoids a visual-only wrapper node; the workflow graph remains executable using the real internal blocks and edges.
+
 ## What Each Workflow Needs To Run Well
 
 - File workflows need either a runtime upload, a selected File Library item, saved File Library IDs on the File Upload block, or valid default local paths.
@@ -294,6 +310,9 @@ DELETE /workflows/{workflow_id}/permissions/{permission_id}
 GET    /workflows/{workflow_id}/comments
 POST   /workflows/{workflow_id}/comments
 GET    /workflows/{workflow_id}/history
+GET    /workflows/{workflow_id}/collaboration/state
+POST   /workflows/{workflow_id}/collaboration/presence
+POST   /workflows/{workflow_id}/collaboration/conflicts/check
 GET    /subflows
 POST   /workflows/{workflow_id}/subflows
 
@@ -413,9 +432,9 @@ These directories are intentionally ignored by Git except `.gitkeep` placeholder
 
 ## Recommended Next Improvements
 
-- Add multiplayer editing presence and conflict resolution for collaborative builder sessions.
-- Add a visual insertion flow for saved Components so subflows can be dropped back onto the canvas as grouped blocks.
-- Add provider adapters for email, Slack/Teams, database writes, and browser automation where current blocks intentionally prepare local payloads first.
+- Expand collaborative editing into true multiplayer cursors and merge tooling beyond the current presence heartbeat and conflict check foundation.
+- Add richer component editing tools such as named public boundary ports, component previews, and one-click component re-save after editing an inserted cluster.
+- Add production-grade provider adapters for database writes and browser automation where current blocks intentionally stay guarded/local-first.
 - Add production auth/token handling if this moves beyond local-first use.
 - Add E2E browser tests around upload -> extract -> RAG -> chatbot -> output and publish chat flows.
 - Add automated frontend E2E tests for builder interactions and workflow app uploads.

@@ -284,6 +284,38 @@ export type WorkflowSubflow = {
   created_at: string;
 };
 
+export type WorkflowPresence = {
+  id: number;
+  workflow_id: number;
+  user_id: number | null;
+  session_id: string;
+  display_name: string | null;
+  node_id: string | null;
+  cursor: Record<string, unknown>;
+  graph_version: number | null;
+  last_seen_at: string;
+  created_at: string;
+};
+
+export type CollaborationState = {
+  workflow_id: number;
+  current_version: number;
+  latest_saved_version: number;
+  updated_at: string;
+  active_presence: WorkflowPresence[];
+};
+
+export type WorkflowConflictCheck = {
+  workflow_id: number;
+  has_conflict: boolean;
+  server_version: number;
+  server_updated_at: string;
+  client_version: number | null;
+  client_updated_at: string | null;
+  active_presence: WorkflowPresence[];
+  resolution: string;
+};
+
 export type PublishWorkflowResponse = {
   workflow_id: number;
   slug: string;
@@ -741,6 +773,31 @@ export function createWorkflowSubflow(
   payload: { name: string; description?: string | null; graph_json: BuilderGraph },
 ) {
   return requestJson<WorkflowSubflow>(`/workflows/${workflowId}/subflows`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getWorkflowCollaborationState(workflowId: number, sessionId?: string) {
+  const suffix = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return requestJson<CollaborationState>(`/workflows/${workflowId}/collaboration/state${suffix}`);
+}
+
+export function heartbeatWorkflowPresence(
+  workflowId: number,
+  payload: { session_id: string; display_name?: string; node_id?: string | null; cursor?: Record<string, unknown>; graph_version?: number | null },
+) {
+  return requestJson<WorkflowPresence>(`/workflows/${workflowId}/collaboration/presence`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function checkWorkflowConflicts(
+  workflowId: number,
+  payload: { base_version?: number | null; base_updated_at?: string | null },
+) {
+  return requestJson<WorkflowConflictCheck>(`/workflows/${workflowId}/collaboration/conflicts/check`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

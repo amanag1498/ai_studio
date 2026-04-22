@@ -43,6 +43,7 @@ import {
   type BuilderNode,
 } from "@vmb/shared";
 import { BuilderBlockNode } from "./BuilderBlockNode";
+import type { ComponentBoundaryPort, ComponentGroupData } from "./ComponentGroupNode";
 import { RagManager } from "./RagManager";
 import {
   BUILDER_GRAPH_STORAGE_KEY,
@@ -59,15 +60,20 @@ import {
 } from "../lib/builder";
 import {
   autoBuildWorkflow,
+  checkWorkflowConflicts,
   createWorkflow,
   createWorkflowComment,
+  createWorkflowSubflow,
   executeWorkflowAsync,
   executeWorkflow,
+  getWorkflowCollaborationState,
   getChatUrl,
   getRunEventsUrl,
   getWorkflow,
   getWorkflowRun,
+  heartbeatWorkflowPresence,
   listFiles,
+  listSubflows,
   publishWorkflow,
   saveWorkflowVersion,
   testWorkflowNode,
@@ -75,7 +81,9 @@ import {
   updateWorkflow,
   type RuntimeUploadResponse,
   type FileLibraryItem,
+  type WorkflowPresence,
   type WorkflowRunRecord,
+  type WorkflowSubflow,
 } from "../lib/api";
 
 const BUILDER_WORKFLOW_ID_STORAGE_KEY = "vmb-builder-workflow-id";
@@ -194,6 +202,21 @@ type DataFlowOutputMapping = {
   }>;
 };
 
+type ComponentInstance = {
+  id: string;
+  name: string;
+  description?: string;
+  nodeIds: string[];
+  edges: BuilderEdge[];
+  inputs: ComponentBoundaryPort[];
+  outputs: ComponentBoundaryPort[];
+  bounds: { x: number; y: number; width: number; height: number };
+  collapsed: boolean;
+  childOffsets: Record<string, { x: number; y: number }>;
+  onToggle: (componentId: string) => void;
+  onSave: (componentId: string) => void;
+};
+
 function toFlowNodes(nodes: BuilderNode[]): Node[] {
   return nodes.map((node) => ({
     ...node,
@@ -295,7 +318,10 @@ function decorateFlowEdges(
 }
 
 function toBuilderGraph(nodes: Node[], edges: Edge[]): BuilderGraph {
-  return formatGraph(nodes as BuilderNode[], edges as BuilderEdge[]);
+  const executableNodes = nodes.filter((node) => node.type === "builderBlock") as BuilderNode[];
+  const executableNodeIds = new Set(executableNodes.map((node) => node.id));
+  const executableEdges = edges.filter((edge) => executableNodeIds.has(edge.source) && executableNodeIds.has(edge.target));
+  return formatGraph(executableNodes, executableEdges as BuilderEdge[]);
 }
 
 function isChatWorkflow(graph: BuilderGraph) {
@@ -829,6 +855,200 @@ function getConnectedNodeIds(selectedNode: BuilderNode | undefined, edges: Build
   return connected;
 }
 
+function getNodeComponentId(node: Node) {
+  const builderNode = node as BuilderNode;
+  return typeof builderNode.data?.config?.componentInstanceId === "string"
+    ? String(builderNode.data.config.componentInstanceId)
+    : "";
+}
+
+function getNodeComponentName(node: Node) {
+  const builderNode = node as BuilderNode;
+  return typeof builderNode.data?.config?.componentName === "string"
+    ? String(builderNode.data.config.componentName)
+    : "Reusable Component";
+}
+
+function getNodeComponentDescription(node: Node) {
+  const builderNode = node as BuilderNode;
+  return typeof builderNode.data?.config?.componentDescription === "string"
+    ? String(builderNode.data.config.componentDescription)
+    : undefined;
+}
+
+function uniqueBoundaryPorts(ports: ComponentBoundaryPort[]) {
+  const seen = new Set<string>();
+  return ports.filter((port) => {
+    if (seen.has(port.id)) return false;
+    seen.add(port.id);
+    return true;
+  });
+}
+
+function getGraphBoundaryPorts(componentNodes: BuilderNode[], internalEdges: BuilderEdge[]) {
+  const internalInputKeys = new Set(internalEdges.map((edge) => `${edge.target}:${handlePortId(edge.targetHandle, "input")}`));
+  const internalOutputKeys = new Set(internalEdges.map((edge) => `${edge.source}:${handlePortId(edge.sourceHandle, "output")}`));
+  return {
+    inputs: uniqueBoundaryPorts(
+      componentNodes.flatMap((node) =>
+        node.data.inputs
+          .filter((port) => !internalInputKeys.has(`${node.id}:${port.id}`))
+          .map((port) => ({
+            id: `${node.id}:${port.id}`,
+            nodeId: node.id,
+            nodeLabel: node.data.label,
+            port,
+          })),
+      ),
+    ),
+    outputs: uniqueBoundaryPorts(
+      componentNodes.flatMap((node) =>
+        node.data.outputs
+          .filter((port) => !internalOutputKeys.has(`${node.id}:${port.id}`))
+          .map((port) => ({
+            id: `${node.id}:${port.id}`,
+            nodeId: node.id,
+            nodeLabel: node.data.label,
+            port,
+          })),
+      ),
+    ),
+  };
+}
+
+function buildComponentInstances(
+  nodes: Node[],
+  edges: BuilderEdge[],
+  collapsedComponents: Set<string>,
+  componentAnchors: Record<string, { x: number; y: number }>,
+  onToggle: (componentId: string) => void,
+  onSave: (componentId: string) => void,
+): ComponentInstance[] {
+  const builderNodes = nodes.filter((node) => node.type === "builderBlock") as BuilderNode[];
+  const grouped = new Map<string, BuilderNode[]>();
+
+  for (const node of builderNodes) {
+    const componentId = getNodeComponentId(node);
+    if (!componentId) continue;
+    grouped.set(componentId, [...(grouped.get(componentId) || []), node]);
+  }
+
+  return Array.from(grouped.entries()).map(([componentId, componentNodes]) => {
+    const nodeIds = componentNodes.map((node) => node.id);
+    const nodeIdSet = new Set(nodeIds);
+    const internalEdges = edges.filter((edge) => nodeIdSet.has(edge.source) && nodeIdSet.has(edge.target));
+    const minX = Math.min(...componentNodes.map((node) => node.position.x));
+    const minY = Math.min(...componentNodes.map((node) => node.position.y));
+    const maxX = Math.max(...componentNodes.map((node) => node.position.x + 285));
+    const maxY = Math.max(...componentNodes.map((node) => node.position.y + 190));
+    const { inputs, outputs } = getGraphBoundaryPorts(componentNodes, internalEdges);
+    const collapsed = collapsedComponents.has(componentId);
+    const anchor = componentAnchors[componentId];
+    const boundsX = collapsed && anchor ? anchor.x : minX - 34;
+    const boundsY = collapsed && anchor ? anchor.y : minY - 82;
+    return {
+      id: componentId,
+      name: getNodeComponentName(componentNodes[0]),
+      description: getNodeComponentDescription(componentNodes[0]),
+      nodeIds,
+      edges: internalEdges,
+      inputs,
+      outputs,
+      bounds: {
+        x: boundsX,
+        y: boundsY,
+        width: Math.max(330, maxX - minX + 68),
+        height: Math.max(245, maxY - minY + 118),
+      },
+      collapsed,
+      childOffsets: Object.fromEntries(
+        componentNodes.map((node) => [
+          node.id,
+          {
+            x: node.position.x - boundsX,
+            y: node.position.y - boundsY,
+          },
+        ]),
+      ),
+      onToggle,
+      onSave,
+    };
+  });
+}
+
+function toComponentGroupNode(component: ComponentInstance): Node<ComponentGroupData> {
+  return {
+    id: `component-group-${component.id}`,
+    type: "componentGroup",
+    position: { x: component.bounds.x, y: component.bounds.y },
+    draggable: true,
+    selectable: true,
+    data: {
+      componentId: component.id,
+      label: component.name,
+      description: component.description,
+      collapsed: component.collapsed,
+      nodeCount: component.nodeIds.length,
+      edgeCount: component.edges.length,
+      childOffsets: component.childOffsets,
+      inputs: component.inputs,
+      outputs: component.outputs,
+      onToggle: component.onToggle,
+      onSave: component.onSave,
+    },
+    style: {
+      width: component.collapsed ? 360 : component.bounds.width,
+      height: component.collapsed ? 255 : component.bounds.height,
+      zIndex: component.collapsed ? 3 : 0,
+    },
+  };
+}
+
+  function parseComponentHandle(handle: string | null | undefined, direction: "input" | "output") {
+    const prefix = direction === "input" ? "in:" : "out:";
+    if (!handle?.startsWith(prefix)) return null;
+    const raw = handle.slice(prefix.length);
+    const [nodeId, portId] = raw.split(":");
+    if (!nodeId || !portId) return null;
+    return { nodeId, portId };
+  }
+
+function findComponentForNode(components: ComponentInstance[], nodeId: string) {
+  return components.find((component) => component.nodeIds.includes(nodeId));
+}
+
+function remapComponentDisplayEdge(edge: BuilderEdge, components: ComponentInstance[]) {
+  const sourceComponent = findComponentForNode(components, edge.source);
+  const targetComponent = findComponentForNode(components, edge.target);
+  if (sourceComponent?.collapsed && targetComponent?.collapsed && sourceComponent.id === targetComponent.id) {
+    return null;
+  }
+  if (sourceComponent?.collapsed && targetComponent?.collapsed && sourceComponent.id !== targetComponent.id) {
+    return {
+      ...edge,
+      source: `component-group-${sourceComponent.id}`,
+      sourceHandle: `out:${edge.source}:${handlePortId(edge.sourceHandle, "output")}`,
+      target: `component-group-${targetComponent.id}`,
+      targetHandle: `in:${edge.target}:${handlePortId(edge.targetHandle, "input")}`,
+    };
+  }
+  if (sourceComponent?.collapsed) {
+    return {
+      ...edge,
+      source: `component-group-${sourceComponent.id}`,
+      sourceHandle: `out:${edge.source}:${handlePortId(edge.sourceHandle, "output")}`,
+    };
+  }
+  if (targetComponent?.collapsed) {
+    return {
+      ...edge,
+      target: `component-group-${targetComponent.id}`,
+      targetHandle: `in:${edge.target}:${handlePortId(edge.targetHandle, "input")}`,
+    };
+  }
+  return edge;
+}
+
 function getEdgeInspection(edge: BuilderEdge, nodes: BuilderNode[], workflowRun: WorkflowRunRecord | null) {
   const sourceNode = getBuilderNode(nodes, edge.source);
   const targetNode = getBuilderNode(nodes, edge.target);
@@ -899,6 +1119,8 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const [paletteSearch, setPaletteSearch] = useState("");
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isComponentsOpen, setIsComponentsOpen] = useState(false);
+  const [isBlockSelectionMode, setIsBlockSelectionMode] = useState(false);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [commandSearch, setCommandSearch] = useState("");
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -913,13 +1135,19 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const [promptPlaygroundInput, setPromptPlaygroundInput] = useState("Summarize the remote work policy and return action items.");
   const [promptPlaygroundResult, setPromptPlaygroundResult] = useState<Record<string, unknown> | null>(null);
   const [libraryFiles, setLibraryFiles] = useState<FileLibraryItem[]>([]);
+  const [savedComponents, setSavedComponents] = useState<WorkflowSubflow[]>([]);
+  const [collapsedComponents, setCollapsedComponents] = useState<Set<string>>(new Set());
+  const [componentAnchors, setComponentAnchors] = useState<Record<string, { x: number; y: number }>>({});
+  const [componentSelectionIds, setComponentSelectionIds] = useState<Set<string>>(new Set());
+  const [presence, setPresence] = useState<WorkflowPresence[]>([]);
+  const [loadedWorkflowMeta, setLoadedWorkflowMeta] = useState<{ version: number; updatedAt: string | null }>({ version: 1, updatedAt: null });
   const [persistedWorkflowId, setPersistedWorkflowId] = useState<number | null>(() => {
     return workflowId ?? null;
   });
   const [lastRun, setLastRun] = useState<WorkflowRunRecord | null>(null);
   const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
 
-  const selectedNode = nodes.find((node) => node.selected) as BuilderNode | undefined;
+  const selectedNode = nodes.find((node) => node.type === "builderBlock" && node.selected) as BuilderNode | undefined;
   const selectedEdge = selectedEdgeId
     ? (edges.find((edge) => edge.id === selectedEdgeId) as BuilderEdge | undefined)
     : (edges.find((edge) => edge.selected) as BuilderEdge | undefined);
@@ -935,11 +1163,20 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const selectedEdgeInspection = selectedEdge
     ? getEdgeInspection(selectedEdge, nodes as BuilderNode[], lastRun)
     : null;
+  const componentInstances: ComponentInstance[] = [];
+  const collapsedComponentIds = new Set(componentInstances.filter((component) => component.collapsed).map((component) => component.id));
+  const collapsedChildNodeIds = new Set(
+    componentInstances
+      .filter((component) => component.collapsed)
+      .flatMap((component) => component.nodeIds),
+  );
 
   function setGraph(graph: BuilderGraph) {
     const hydratedGraph = hydrateGraph(graph);
     setNodes(toFlowNodes(hydratedGraph.nodes));
     setEdges(toFlowEdges(hydratedGraph.edges));
+    setComponentSelectionIds(new Set());
+    setComponentAnchors({});
   }
 
   const runtimeInputNodes = nodes.filter((node) =>
@@ -959,16 +1196,24 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const workflowModeLabel = getBuilderWorkflowModeLabel(currentGraph);
   const runDisplayCards = getRunDisplayCards(lastRun, nodes);
   const connectedNodeIds = getConnectedNodeIds(selectedNode, edges as BuilderEdge[]);
-  const flowNodesWithBadges = nodes.map((node) => {
+  const selectedBuilderNodeCount = componentSelectionIds.size;
+  const builderFlowNodesWithBadges = nodes.map((node) => {
     const builderNode = node as BuilderNode;
     const isConnectedToSelection = connectedNodeIds.has(node.id);
     const dimUnrelated = selectedNode && connectedNodeIds.size > 1 && !isConnectedToSelection;
+    const componentId = getNodeComponentId(node);
+    const hiddenByCollapsedComponent = componentId ? collapsedChildNodeIds.has(node.id) : false;
+    const selectedForComponent = componentSelectionIds.has(node.id);
     return {
       ...node,
+      selected: selectedForComponent || node.selected,
+      hidden: hiddenByCollapsedComponent,
       style: {
         ...(node.style || {}),
-        opacity: dimUnrelated ? 0.42 : 1,
-        filter: dimUnrelated ? "grayscale(0.35)" : undefined,
+        opacity: dimUnrelated && !selectedForComponent ? 0.42 : 1,
+        filter: dimUnrelated && !selectedForComponent ? "grayscale(0.35)" : undefined,
+        zIndex: 2,
+        boxShadow: selectedForComponent ? "0 0 0 6px rgba(182,255,135,0.42)" : undefined,
       },
       data: {
         ...builderNode.data,
@@ -977,7 +1222,8 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       },
     };
   });
-  const flowEdgesWithLabels = decorateFlowEdges(edges, nodes as BuilderNode[], selectedEdge?.id || null, selectedNode?.id);
+  const flowNodesWithBadges = builderFlowNodesWithBadges;
+  const flowEdgesWithLabels = decorateFlowEdges(toFlowEdges(edges as BuilderEdge[]), nodes as BuilderNode[], selectedEdge?.id || null, selectedNode?.id);
   const filteredPaletteGroups = paletteGroups
     .map((group) => ({
       ...group,
@@ -1041,6 +1287,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       .then((workflow) => {
         setGraph(workflow.graph_json);
         setPersistedWorkflowId(workflow.id);
+        setLoadedWorkflowMeta({ version: workflow.current_version, updatedAt: workflow.updated_at });
         localStorage.setItem(BUILDER_WORKFLOW_ID_STORAGE_KEY, String(workflow.id));
         setPublishedUrl(
           workflow.published_slug && isChatWorkflow(workflow.graph_json)
@@ -1059,7 +1306,30 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     listFiles()
       .then((records) => setLibraryFiles(records.slice(0, 30)))
       .catch(() => setLibraryFiles([]));
+    listSubflows()
+      .then((records) => setSavedComponents(records))
+      .catch(() => setSavedComponents([]));
   }, []);
+
+  useEffect(() => {
+    if (!persistedWorkflowId) return;
+    const localUser = getLocalUser();
+    const heartbeat = () => {
+      void heartbeatWorkflowPresence(persistedWorkflowId, {
+        session_id: sessionId,
+        display_name: localUser?.display_name || localUser?.email || "Local collaborator",
+        node_id: selectedNode?.id || null,
+        cursor: { selected_node_id: selectedNode?.id || null, selected_edge_id: selectedEdge?.id || null },
+        graph_version: currentGraph.version,
+      }).catch(() => undefined);
+      void getWorkflowCollaborationState(persistedWorkflowId, sessionId)
+        .then((state) => setPresence(state.active_presence || []))
+        .catch(() => setPresence([]));
+    };
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 12_000);
+    return () => window.clearInterval(timer);
+  }, [persistedWorkflowId, sessionId, selectedNode?.id, selectedEdge?.id, currentGraph.version]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1393,11 +1663,84 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   }
 
   function onNodesChange(changes: NodeChange[]) {
-    setNodes((currentNodes) => applyNodeChanges(changes, currentNodes));
+    const safeChanges = isBlockSelectionMode
+      ? changes.filter((change) => change.type !== "select")
+      : changes;
+    const componentPositionChanges = safeChanges.filter(
+      (change) => change.type === "position" && change.id.startsWith("component-group-") && "position" in change && change.position,
+    );
+    if (!componentPositionChanges.length) {
+      setNodes((currentNodes) => applyNodeChanges(safeChanges, currentNodes));
+      return;
+    }
+
+    setNodes((currentNodes) => {
+      const currentComponents = buildComponentInstances(
+        currentNodes,
+        edges as BuilderEdge[],
+        collapsedComponents,
+        componentAnchors,
+        toggleComponentCollapse,
+        saveComponentById,
+      );
+      const componentPositionChangeMap = new Map(
+        componentPositionChanges
+          .filter((change): change is Extract<NodeChange, { type: "position" }> & { position: { x: number; y: number } } =>
+            change.type === "position" && Boolean(change.position),
+          )
+          .map((change) => [change.id, change]),
+      );
+      const shiftedNodes = currentNodes.map((node) => {
+        const positionChange = componentPositionChangeMap.get(`component-group-${getNodeComponentId(node)}`);
+        if (!positionChange || !("position" in positionChange) || !positionChange.position) {
+          return node;
+        }
+        const componentId = getNodeComponentId(node);
+        const component = currentComponents.find((item) => item.id === componentId);
+        const offset = component?.childOffsets[node.id];
+        if (!offset) {
+          return node;
+        }
+        return {
+          ...node,
+          position: {
+            x: positionChange.position.x + offset.x,
+            y: positionChange.position.y + offset.y,
+          },
+        };
+      });
+      const nextAnchors = { ...componentAnchors };
+      for (const [groupId, positionChange] of componentPositionChangeMap.entries()) {
+        const componentId = groupId.replace(/^component-group-/, "");
+        nextAnchors[componentId] = { x: positionChange.position.x, y: positionChange.position.y };
+      }
+      setComponentAnchors(nextAnchors);
+      return applyNodeChanges(
+        safeChanges.filter((change) => !("id" in change) || !change.id.startsWith("component-group-")),
+        shiftedNodes,
+      );
+    });
   }
 
-  function onNodeClick(_: React.MouseEvent, node: Node) {
+  function onNodeClick(event: React.MouseEvent, node: Node) {
     setSelectedEdgeId(null);
+    if (isBlockSelectionMode || event.shiftKey || event.metaKey || event.ctrlKey) {
+      setEdges((currentEdges) => currentEdges.map((item) => ({ ...item, selected: false })));
+      setNodes((currentNodes) => currentNodes.map((item) => ({ ...item, selected: false })));
+      setComponentSelectionIds((current) => {
+        const next = new Set(current);
+        if (next.has(node.id)) {
+          next.delete(node.id);
+        } else {
+          next.add(node.id);
+        }
+        return next;
+      });
+      setIsInspectorOpen(false);
+      setStatusMessage("Selection mode: click blocks to add/remove them, then save selected blocks as a component.");
+      return;
+    }
+    setComponentSelectionIds(new Set());
     setNodes((currentNodes) =>
       currentNodes.map((item) => ({ ...item, selected: item.id === node.id })),
     );
@@ -1411,6 +1754,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
 
   function onEdgeClick(_: React.MouseEvent, edge: Edge) {
     setSelectedEdgeId(edge.id);
+    setComponentSelectionIds(new Set());
     setNodes((currentNodes) => currentNodes.map((item) => ({ ...item, selected: false })));
     setEdges((currentEdges) => currentEdges.map((item) => ({ ...item, selected: item.id === edge.id })));
     setIsInspectorOpen(true);
@@ -1420,22 +1764,57 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
 
   function onPaneClick() {
     setSelectedEdgeId(null);
+    if (isBlockSelectionMode) {
+      setComponentSelectionIds(new Set());
+      setNodes((currentNodes) => currentNodes.map((node) => ({ ...node, selected: false })));
+      setStatusMessage("Selection cleared. Click blocks to build a component selection.");
+    }
+  }
+
+  function resolveConnection(connection: Connection) {
+    let source = connection.source || "";
+    let target = connection.target || "";
+    let sourceHandle = connection.sourceHandle || null;
+    let targetHandle = connection.targetHandle || null;
+
+    if (source.startsWith("component-group-")) {
+      const parsed = parseComponentHandle(sourceHandle, "output");
+      if (parsed) {
+        source = parsed.nodeId;
+        sourceHandle = `out:${parsed.portId}`;
+      } else {
+        setStatusMessage("Use one of the component output handles on the right edge to connect from this component.");
+      }
+    }
+
+    if (target.startsWith("component-group-")) {
+      const parsed = parseComponentHandle(targetHandle, "input");
+      if (parsed) {
+        target = parsed.nodeId;
+        targetHandle = `in:${parsed.portId}`;
+      } else {
+        setStatusMessage("Use one of the component input handles on the left edge to connect into this component.");
+      }
+    }
+
+    return { source, target, sourceHandle, targetHandle };
   }
 
   function isValidConnection(connection: Connection) {
-    if (!connection.source || !connection.target) {
+    const resolvedConnection = resolveConnection(connection);
+    if (!resolvedConnection.source || !resolvedConnection.target) {
       return false;
     }
 
-    const sourceNode = nodes.find((node) => node.id === connection.source) as BuilderNode | undefined;
-    const targetNode = nodes.find((node) => node.id === connection.target) as BuilderNode | undefined;
+    const sourceNode = nodes.find((node) => node.id === resolvedConnection.source) as BuilderNode | undefined;
+    const targetNode = nodes.find((node) => node.id === resolvedConnection.target) as BuilderNode | undefined;
 
     if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) {
       return false;
     }
 
-    const sourcePort = getPortByHandle(sourceNode, connection.sourceHandle, "output");
-    const targetPort = getPortByHandle(targetNode, connection.targetHandle, "input");
+    const sourcePort = getPortByHandle(sourceNode, resolvedConnection.sourceHandle, "output");
+    const targetPort = getPortByHandle(targetNode, resolvedConnection.targetHandle, "input");
 
     if (!sourcePort || !targetPort) {
       return false;
@@ -1450,20 +1829,21 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       return;
     }
 
-    const sourceNode = nodes.find((node) => node.id === connection.source) as BuilderNode | undefined;
-    const targetNode = nodes.find((node) => node.id === connection.target) as BuilderNode | undefined;
+    const resolvedConnection = resolveConnection(connection);
+    const sourceNode = nodes.find((node) => node.id === resolvedConnection.source) as BuilderNode | undefined;
+    const targetNode = nodes.find((node) => node.id === resolvedConnection.target) as BuilderNode | undefined;
     const sourcePort = sourceNode
-      ? getPortByHandle(sourceNode, connection.sourceHandle, "output")
+      ? getPortByHandle(sourceNode, resolvedConnection.sourceHandle, "output")
       : undefined;
     const targetPort = targetNode
-      ? getPortByHandle(targetNode, connection.targetHandle, "input")
+      ? getPortByHandle(targetNode, resolvedConnection.targetHandle, "input")
       : undefined;
 
     setEdges((currentEdges) =>
       addEdge(
         {
-          ...connection,
-          id: `edge-${connection.source}-${connection.sourceHandle}-${connection.target}-${connection.targetHandle}`,
+          ...resolvedConnection,
+          id: `edge-${resolvedConnection.source}-${resolvedConnection.sourceHandle}-${resolvedConnection.target}-${resolvedConnection.targetHandle}`,
           animated: true,
           label: sourcePort && targetPort ? `${sourcePort.label} -> ${targetPort.label}` : undefined,
           style: { strokeWidth: 1.5, stroke: "#081018" },
@@ -2126,7 +2506,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
         x: selectedNode.position.x + 56,
         y: selectedNode.position.y + 56,
       },
-      selected: true,
+      selected: false,
       data: {
         ...selectedNode.data,
         label: `${selectedNode.data.label} copy`,
@@ -2140,6 +2520,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
         duplicatedNode,
       ],
     );
+    setComponentSelectionIds(new Set());
     setIsInspectorOpen(true);
     setInspectorTab("flow");
     setStatusMessage(`${selectedNode.data.label} duplicated. Connect its ports when ready.`);
@@ -2153,15 +2534,186 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     const edgeLabel = getEdgeAutoLabel(selectedEdge, nodes as BuilderNode[]);
     setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== selectedEdge.id));
     setSelectedEdgeId(null);
+    setComponentSelectionIds(new Set());
     setStatusMessage(`Removed connection: ${edgeLabel}.`);
   }
 
   function selectFlowEndpoint(nodeId: string) {
     setSelectedEdgeId(null);
+    setComponentSelectionIds(new Set());
     setNodes((currentNodes) => currentNodes.map((node) => ({ ...node, selected: node.id === nodeId })));
     setEdges((currentEdges) => currentEdges.map((edge) => ({ ...edge, selected: false })));
     setIsInspectorOpen(true);
     setInspectorTab("flow");
+  }
+
+  function toggleComponentCollapse(componentId: string) {
+    setCollapsedComponents((current) => {
+      const next = new Set(current);
+      if (next.has(componentId)) {
+        next.delete(componentId);
+      } else {
+        next.add(componentId);
+        const component = componentInstances.find((item) => item.id === componentId);
+        if (component) {
+          setComponentAnchors((anchors) => ({
+            ...anchors,
+            [componentId]: { x: component.bounds.x, y: component.bounds.y },
+          }));
+        }
+      }
+      return next;
+    });
+    const component = componentInstances.find((item) => item.id === componentId);
+    setStatusMessage(component ? `Toggled component "${component.name}".` : "Toggled component group.");
+  }
+
+  function getSelectedComponentNodes(componentId?: string) {
+    if (componentId) {
+      return (nodes.filter((node) => node.type === "builderBlock" && getNodeComponentId(node) === componentId) as BuilderNode[]);
+    }
+    return nodes.filter((node) => node.type === "builderBlock" && componentSelectionIds.has(node.id)) as BuilderNode[];
+  }
+
+  async function saveSelectedNodesAsComponent(componentId?: string) {
+    const selectedNodes = getSelectedComponentNodes(componentId);
+    if (!selectedNodes.length) {
+      setStatusMessage("Select two or more blocks, then save them as a component.");
+      return;
+    }
+    if (!persistedWorkflowId) {
+      setStatusMessage("Save the workflow once before creating reusable components.");
+      return;
+    }
+
+    const defaultName = componentId
+      ? componentInstances.find((component) => component.id === componentId)?.name || "Reusable Component"
+      : selectedNodes.length === 1
+        ? selectedNodes[0].data.label
+        : `${selectedNodes[0].data.label} component`;
+    const name = window.prompt("Component name", defaultName);
+    if (!name?.trim()) {
+      setStatusMessage("Component save cancelled.");
+      return;
+    }
+
+    const selectedNodeIds = new Set(selectedNodes.map((node) => node.id));
+    const selectedEdges = (edges as BuilderEdge[]).filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target));
+    const minX = Math.min(...selectedNodes.map((node) => node.position.x));
+    const minY = Math.min(...selectedNodes.map((node) => node.position.y));
+    const componentGraph = formatGraph(
+      selectedNodes.map((node) => ({
+        ...node,
+        selected: false,
+        position: {
+          x: node.position.x - minX + 80,
+          y: node.position.y - minY + 100,
+        },
+      })) as BuilderNode[],
+      selectedEdges.map((edge) => ({ ...edge, selected: false })) as BuilderEdge[],
+    );
+
+    try {
+      const component = await createWorkflowSubflow(persistedWorkflowId, {
+        name: name.trim(),
+        description: `Saved from builder selection with ${selectedNodes.length} block(s).`,
+        graph_json: componentGraph,
+      });
+      setSavedComponents((current) => [component, ...current.filter((item) => item.id !== component.id)]);
+      setNodes((current) =>
+        current.map((node) => {
+          if (!selectedNodeIds.has(node.id)) return node;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              config: {
+                ...node.data.config,
+                componentInstanceId: componentId || `saved-${component.id}-${Date.now()}`,
+                componentName: name.trim(),
+                componentDescription: `Saved from builder selection with ${selectedNodes.length} block(s).`,
+              },
+            },
+          };
+        }),
+      );
+      setStatusMessage(`Saved "${name.trim()}" as a reusable component with ${selectedNodes.length} block(s).`);
+      setIsComponentsOpen(true);
+      setComponentSelectionIds(new Set());
+      setIsBlockSelectionMode(false);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not save component.");
+    }
+  }
+
+  function saveComponentById(componentId: string) {
+    void saveSelectedNodesAsComponent(componentId);
+  }
+
+  function insertComponent(component: WorkflowSubflow) {
+    const componentGraph = component.graph_json;
+    if (!componentGraph?.nodes?.length) {
+      setStatusMessage("This component does not contain saved graph blocks yet. Re-save it from selected blocks, then insert again.");
+      return;
+    }
+    const suffix = `component-${component.id}-${Date.now()}`;
+    const componentInstanceId = suffix;
+    const basePosition = reactFlowInstance?.screenToFlowPosition({ x: window.innerWidth / 2 - 180, y: window.innerHeight / 2 - 80 }) || { x: 180, y: 180 };
+    const idMap = new Map(componentGraph.nodes.map((node) => [node.id, `${node.id}-${suffix}`]));
+    const insertedNodes = componentGraph.nodes.map((node, index) => {
+      const row = Math.floor(index / 4);
+      const column = index % 4;
+      const fanOffset = column * 46;
+      const rowOffset = row * 92;
+      const overlapOffset = index * 7;
+      return {
+        ...node,
+        id: idMap.get(node.id) || `${node.id}-${suffix}`,
+        selected: true,
+        position: {
+          x: basePosition.x + fanOffset + overlapOffset,
+          y: basePosition.y + rowOffset + column * 16,
+        },
+        style: {
+          ...(node as Node).style,
+          zIndex: 20 + index,
+          boxShadow: "0 18px 50px rgba(8,16,24,0.14)",
+        },
+        data: {
+          ...node.data,
+          label: node.data.label,
+          config: {
+            ...node.data.config,
+            componentInstanceId,
+            componentName: component.name,
+            componentDescription: component.description || "Reusable workflow component.",
+          },
+          statusBadges: ["component", `group ${index + 1}/${componentGraph.nodes.length}`],
+        },
+      };
+    }) as Node[];
+    const insertedEdges = componentGraph.edges
+      .filter((edge) => idMap.has(edge.source) && idMap.has(edge.target))
+      .map((edge) => ({
+        ...edge,
+        id: `${edge.id}-${suffix}`,
+        source: idMap.get(edge.source) || edge.source,
+        target: idMap.get(edge.target) || edge.target,
+        selected: false,
+      })) as Edge[];
+    const boundary = getGraphBoundaryPorts(insertedNodes as BuilderNode[], insertedEdges as BuilderEdge[]);
+    setSelectedEdgeId(null);
+    setNodes((current) => [
+      ...current.map((node) => ({ ...node, selected: false })),
+      ...insertedNodes,
+    ]);
+    setEdges((current) => current.concat(toFlowEdges(insertedEdges as BuilderEdge[])));
+    setIsComponentsOpen(false);
+    setIsInspectorOpen(false);
+    setStatusMessage(
+      `Inserted "${component.name}" as editable blocks with ${boundary.inputs.length} open input and ${boundary.outputs.length} open output port(s). Use normal node handles to connect them.`,
+    );
+    window.setTimeout(() => reactFlowInstance?.setCenter(basePosition.x + 180, basePosition.y + 120, { zoom: 0.92, duration: 350 }), 80);
   }
 
   function zoomToFit() {
@@ -2242,6 +2794,27 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
     setStatusMessage("Saving graph and creating a workflow version.");
 
     try {
+      if (persistedWorkflowId) {
+        try {
+          const conflict = await checkWorkflowConflicts(persistedWorkflowId, {
+            base_version: loadedWorkflowMeta.version,
+            base_updated_at: loadedWorkflowMeta.updatedAt,
+          });
+          if (conflict.has_conflict) {
+            const shouldContinue = window.confirm(
+              `Another collaborator may have changed this workflow since you loaded it.\n\nServer version: ${conflict.server_version}\nYour loaded version: ${loadedWorkflowMeta.version}\n\nSave anyway as a new version?`,
+            );
+            if (!shouldContinue) {
+              setStatusMessage("Save paused. Reload the workflow or review Activity before overwriting.");
+              return;
+            }
+          }
+        } catch {
+          // Collaboration checks are advisory; saving should still work if the API is older,
+          // migrations are pending, or the presence service is temporarily unavailable.
+          setStatusMessage("Collaboration conflict check unavailable. Saving graph directly.");
+        }
+      }
       const workflow = await persistWorkflow(graph);
       const version = await saveWorkflowVersion(
         workflow.id,
@@ -2257,6 +2830,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       }
       setGraph(version.graph_json);
       setPersistedWorkflowId(workflow.id);
+      setLoadedWorkflowMeta({ version: version.version_number, updatedAt: null });
       localStorage.setItem(BUILDER_WORKFLOW_ID_STORAGE_KEY, String(workflow.id));
       localStorage.setItem(BUILDER_GRAPH_STORAGE_KEY, serializeGraph(version.graph_json));
       setIsSaveDialogOpen(false);
@@ -2301,6 +2875,18 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       hint: "Open save dialog with required comment",
       shortcut: "⌘ S",
       action: () => void openSaveDialog(),
+    },
+    {
+      title: "Insert saved component",
+      hint: "Open reusable subflows and drop one onto this canvas",
+      shortcut: "Components",
+      action: () => setIsComponentsOpen(true),
+    },
+    {
+      title: "Save selection as component",
+      hint: selectedBuilderNodeCount ? `Package ${selectedBuilderNodeCount} selected block(s)` : "Select multiple blocks first",
+      shortcut: "Component",
+      action: () => void saveSelectedNodesAsComponent(),
     },
     {
       title: "Open block palette",
@@ -2382,6 +2968,11 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               <ClipboardCheck className="h-3.5 w-3.5" aria-hidden />
               {blockerCount ? `${blockerCount} blockers` : "Ready"}
             </span>
+            {presence.length ? (
+              <span className="hidden items-center gap-1.5 rounded-full bg-sand/70 px-3 py-1.5 text-[11px] font-bold text-ink md:inline-flex">
+                {presence.length} editing now
+              </span>
+            ) : null}
           </div>
         </header>
 
@@ -2394,15 +2985,20 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
             <PanelRightOpen className="h-4 w-4" aria-hidden />
             Inspect
           </button>
+          <button type="button" onClick={() => setIsComponentsOpen(true)} className="flex min-h-28 items-center justify-center gap-2 rounded-2xl bg-lime px-2.5 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-ink shadow-panel [writing-mode:vertical-rl]">
+            <Boxes className="h-4 w-4" aria-hidden />
+            Components
+          </button>
         </div>
 
-        {(isPaletteOpen || isInspectorOpen) ? (
+        {(isPaletteOpen || isInspectorOpen || isComponentsOpen) ? (
           <button
             type="button"
             aria-label="Close open sheets"
             onClick={() => {
               setIsPaletteOpen(false);
               setIsInspectorOpen(false);
+              setIsComponentsOpen(false);
             }}
             className="absolute inset-0 z-30 bg-ink/18 backdrop-blur-[1px]"
           />
@@ -2572,6 +3168,76 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
             </div>
           </aside>
 
+          <aside className={`absolute bottom-4 left-4 top-4 z-40 w-[min(360px,calc(100vw-2rem))] overflow-auto rounded-[1.35rem] border border-white/70 bg-white/92 p-3 shadow-panel backdrop-blur transition-transform duration-300 ${isComponentsOpen ? "translate-x-0" : "-translate-x-[115%]"}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="flex items-center gap-2 text-base font-semibold">
+                  <Boxes className="h-4 w-4" aria-hidden />
+                  Components
+                </h2>
+                <p className="mt-0.5 text-[11px] leading-4 text-ink/58">
+                  Insert saved subflows as reusable block groups.
+                </p>
+              </div>
+              <button type="button" onClick={() => setIsComponentsOpen(false)} className="rounded-full bg-mist px-2.5 py-1.5 text-[11px] font-semibold">
+                Close
+              </button>
+            </div>
+            <div className="mt-3 rounded-2xl bg-lime/20 p-3 text-xs leading-5 text-ink/65">
+              Components now insert as real editable blocks, not a wrapper card. This keeps every block clickable, draggable, attachable, and executable with normal node handles.
+            </div>
+            <button
+              type="button"
+              onClick={() => void saveSelectedNodesAsComponent()}
+              disabled={!persistedWorkflowId || selectedBuilderNodeCount === 0}
+              className="mt-3 w-full rounded-2xl bg-ink px-3 py-2.5 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              Save Selected Blocks As Component
+              <span className="mt-1 block text-[10px] font-semibold text-white/60">
+                {persistedWorkflowId
+                  ? `${selectedBuilderNodeCount} selected block(s)`
+                  : "Save workflow first"}
+              </span>
+            </button>
+            <div className="mt-3 max-h-[76vh] space-y-2 overflow-auto pr-1">
+              {savedComponents.map((component) => {
+                const nodeCount = component.graph_json?.nodes?.length || 0;
+                const edgeCount = component.graph_json?.edges?.length || 0;
+                const boundary = component.graph_json
+                  ? getGraphBoundaryPorts(component.graph_json.nodes, component.graph_json.edges)
+                  : { inputs: [], outputs: [] };
+                return (
+                  <article key={component.id} className="rounded-[1.15rem] border border-ink/8 bg-white p-3 shadow-sm">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-ink/38">Component #{component.id}</p>
+                    <h3 className="mt-1 text-sm font-bold text-ink">{component.name}</h3>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-ink/58">
+                      {component.description || "Reusable workflow component."}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-ink/55">
+                      <span className="rounded-full bg-mist px-2 py-1">{nodeCount} blocks</span>
+                      <span className="rounded-full bg-mist px-2 py-1">{edgeCount} links</span>
+                      <span className="rounded-full bg-lime/30 px-2 py-1">{boundary.inputs.length} in</span>
+                      <span className="rounded-full bg-ink/8 px-2 py-1">{boundary.outputs.length} out</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => insertComponent(component)}
+                      disabled={!nodeCount}
+                      className="mt-3 w-full rounded-2xl bg-ink px-3 py-2 text-xs font-bold text-white disabled:opacity-45"
+                    >
+                      Insert Editable Blocks
+                    </button>
+                  </article>
+                );
+              })}
+              {!savedComponents.length ? (
+                <p className="rounded-2xl bg-mist/70 px-3 py-5 text-center text-xs font-semibold text-ink/55">
+                  No saved components yet. Save one from a workflow Activity panel first.
+                </p>
+              ) : null}
+            </div>
+          </aside>
+
           <div className="h-full overflow-hidden rounded-[1.7rem] border border-white/70 bg-white/58 shadow-panel backdrop-blur">
             <div className="pointer-events-none absolute right-6 top-5 z-10 hidden lg:block">
               <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-full border border-ink/10 bg-white/90 px-3 py-2 shadow-panel backdrop-blur">
@@ -2633,6 +3299,48 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                       <LayoutDashboard className="h-3.5 w-3.5" aria-hidden />
                       Layout
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsBlockSelectionMode((current) => !current);
+                        setComponentSelectionIds(new Set());
+                        setNodes((currentNodes) => currentNodes.map((node) => ({ ...node, selected: false })));
+                        setIsInspectorOpen(false);
+                        setStatusMessage(
+                          isBlockSelectionMode
+                            ? "Selection mode off. Click a block to inspect it."
+                            : "Selection mode on. Click blocks to select them for a reusable component.",
+                        );
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold ${
+                        isBlockSelectionMode ? "bg-lime text-ink" : "bg-mist text-ink"
+                      }`}
+                    >
+                      <Boxes className="h-3.5 w-3.5" aria-hidden />
+                      {isBlockSelectionMode ? "Selecting" : "Select Blocks"}
+                    </button>
+                    {selectedBuilderNodeCount ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void saveSelectedNodesAsComponent()}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[11px] font-bold text-white"
+                        >
+                          Save Component ({selectedBuilderNodeCount})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setComponentSelectionIds(new Set());
+                            setNodes((currentNodes) => currentNodes.map((node) => ({ ...node, selected: false })));
+                            setStatusMessage("Component selection cleared.");
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-ink ring-1 ring-ink/8"
+                        >
+                          Clear
+                        </button>
+                      </>
+                    ) : null}
                   </div>
                 </Panel>
               </ReactFlow>

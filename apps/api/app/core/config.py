@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
     telemetry_enabled: bool = True
+    telemetry_console_exporter_enabled: bool = False
     telemetry_service_name: str = "ai-studio-api"
     web_search_provider: str = "duckduckgo"
     web_search_timeout_seconds: float = 8.0

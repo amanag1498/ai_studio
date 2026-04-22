@@ -1800,20 +1800,18 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
               </p>
             </div>
           ) : (
-            <div className="grid gap-3 xl:grid-cols-3">
+            <div className="grid gap-4 xl:grid-cols-3">
               {filteredWorkflows.map((workflow) => (
                 <article
                   key={workflow.id}
-                  className="group rounded-[1.65rem] border border-ink/8 bg-[linear-gradient(180deg,_#ffffff_0%,_#fbfcf8_100%)] p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel"
+                  className="group overflow-hidden rounded-[1.8rem] border border-ink/8 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel"
                 >
+                  <div className="bg-[radial-gradient(circle_at_top_left,_rgba(182,255,135,0.34),_transparent_36%),linear-gradient(135deg,_#ffffff,_#f8f4e8)] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="rounded-full bg-mist px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/45">#{workflow.id}</span>
-                        <span className="rounded-full bg-lime/25 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/55">
-                          {getWorkflowComplexity(workflow)}
-                        </span>
-                        <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/45 ring-1 ring-ink/6">
+                        <span className="rounded-full bg-white/86 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/50 ring-1 ring-ink/6">
                           {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).label}
                         </span>
                       </div>
@@ -1861,30 +1859,16 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     </span>
                   </div>
 
-                  <div className="mt-4 grid grid-cols-3 gap-2">
-                    <div className={`rounded-2xl px-3 py-2 ${workflow.quality_score >= 75 ? "bg-lime/25" : workflow.quality_score >= 50 ? "bg-sand/60" : "bg-coral/15"}`}>
-                      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">Quality</span>
-                      <strong className="mt-1 block text-lg text-ink">{workflow.quality_score}%</strong>
-                    </div>
-                    <div className="rounded-2xl bg-mist/70 px-3 py-2">
-                      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">Runs</span>
-                      <strong className="mt-1 block text-lg text-ink">{workflow.run_count}</strong>
-                    </div>
-                    <div className="rounded-2xl bg-mist/70 px-3 py-2">
-                      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">RAG</span>
-                      <strong className="mt-1 block text-lg text-ink">{workflow.rag_chunk_count}</strong>
-                    </div>
+                  <div className="mt-4 flex items-center gap-4 text-xs font-semibold text-ink/58">
+                    <span>v{workflow.current_version || 1}</span>
+                    <span>{workflow.run_count} run{workflow.run_count === 1 ? "" : "s"}</span>
+                    <span>{workflow.quality_score}% quality</span>
+                    {workflow.rag_chunk_count ? <span>{workflow.rag_chunk_count} chunks</span> : null}
+                  </div>
                   </div>
 
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).capabilities.slice(0, 4).map((capability) => (
-                      <span key={capability} className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/58 ring-1 ring-ink/6">
-                        {capability}
-                      </span>
-                    ))}
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap gap-2">
+                  <div className="p-4">
+                  <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => launchWorkflow(workflow)}
@@ -1906,49 +1890,26 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     >
                       Copy App Link
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => void openVersions(workflow.id)}
+                      className="rounded-full border border-ink/10 bg-sand/65 px-4 py-2 text-sm font-bold text-ink"
+                    >
+                      Versions
+                    </button>
                   </div>
 
-                  <details className="mt-3 rounded-[1.25rem] bg-mist/55 px-3 py-2">
+                  <details className="mt-3 rounded-[1.25rem] bg-mist/45 px-3 py-2">
                     <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.2em] text-ink/48">
-                      Details and admin
+                      More actions
                     </summary>
-                    <div className="mt-3 space-y-3">
-                      <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">
-                        <p className="text-[10px] font-black uppercase tracking-[0.22em] text-ink/40">App routing</p>
-                        <p className="mt-1 text-sm font-semibold text-ink">
-                          Launch {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).launchSurface} · {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).publishMode}
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-ink/55">
-                          {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).description}
-                        </p>
-                      </div>
-                      <div className="grid gap-2 text-sm sm:grid-cols-2">
-                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">Version {workflow.current_version}</div>
-                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">Avg latency {workflow.avg_latency_ms ? `${workflow.avg_latency_ms}ms` : "n/a"}</div>
-                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">Failures {workflow.failed_run_count}</div>
-                        <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-ink/6">{workflow.rag_document_count} docs · {workflow.rag_chunk_count} chunks</div>
-                      </div>
-                      {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).improvements.length ? (
-                        <p className="rounded-2xl bg-sand/50 px-3 py-2 text-xs font-semibold leading-5 text-ink/66">
-                          {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).improvements[0]}
-                        </p>
-                      ) : null}
+                    <div className="mt-3 space-y-2">
                       {workflow.last_run_preview ? (
                         <p className="rounded-2xl bg-white px-3 py-2 text-xs leading-5 text-ink/58 ring-1 ring-ink/6">{workflow.last_run_preview}</p>
-                      ) : null}
-                      {workflow.published_slug && canPublishAsChat(workflowKinds[workflow.id]) ? (
-                        <button
-                          type="button"
-                          onClick={() => onOpenChat(workflow.published_slug || "")}
-                          className="w-full rounded-2xl bg-lime/30 px-3 py-2 text-left text-xs font-semibold text-ink"
-                        >
-                          Chat URL: {getChatUrl(workflow.published_slug)}
-                        </button>
                       ) : null}
                       <div className="flex flex-wrap gap-2">
                         <button type="button" onClick={() => onOpenWorkflowApp(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">App URL</button>
                         <button type="button" onClick={() => publishAndOpen(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">{canPublishAsChat(workflowKinds[workflow.id]) ? "Publish Chat" : "Open App"}</button>
-                        <button type="button" onClick={() => void openVersions(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">Versions</button>
                         <button type="button" onClick={() => void testRagHealth(workflow)} disabled={workflow.rag_chunk_count === 0} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-45">Test RAG</button>
                         <button type="button" onClick={() => void lifecycleAction("duplicate", workflow)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">Duplicate</button>
                     {workflow.last_run_id ? (
@@ -2008,12 +1969,10 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                     >
                       Delete
                     </button>
-                        <span className="rounded-full bg-mist px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-ink/50">
-                      Shareable: /app/{workflow.id}
-                    </span>
                       </div>
                     </div>
                   </details>
+                  </div>
                 </article>
               ))}
             </div>
@@ -2103,13 +2062,13 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
       </div>
       {selectedWorkflowDetails ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-ink/28 p-4 backdrop-blur-sm">
-          <div className="max-h-[82vh] w-full max-w-2xl overflow-auto rounded-[2rem] bg-white p-5 shadow-panel">
+          <div className="max-h-[86vh] w-full max-w-5xl overflow-auto rounded-[2rem] bg-white p-5 shadow-panel">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Version Restore</p>
                 <h2 className="mt-2 text-2xl font-bold">{selectedWorkflowDetails.name}</h2>
                 <p className="mt-1 text-sm text-ink/58">
-                  Restore an older saved graph snapshot. This keeps the workflow and replaces the current graph.
+                  Compare saved graph snapshots, inspect what changed, and restore an older version when needed.
                 </p>
               </div>
               <button
@@ -2123,37 +2082,55 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                 Close
               </button>
             </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <div className="rounded-2xl bg-mist/70 px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-ink/40">Current</p>
+                <p className="mt-1 text-xl font-black text-ink">v{selectedWorkflowDetails.current_version}</p>
+              </div>
+              <div className="rounded-2xl bg-mist/70 px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-ink/40">Saved</p>
+                <p className="mt-1 text-xl font-black text-ink">{selectedWorkflowDetails.versions.length}</p>
+              </div>
+              <div className="rounded-2xl bg-mist/70 px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-ink/40">Latest Save</p>
+                <p className="mt-1 text-sm font-bold text-ink">
+                  {selectedWorkflowDetails.versions[0]?.created_at ? new Date(selectedWorkflowDetails.versions[0].created_at).toLocaleString() : "No saved version"}
+                </p>
+              </div>
+            </div>
             <div className="mt-4 space-y-3">
               {selectedWorkflowDetails.versions.length ? selectedWorkflowDetails.versions.map((version) => (
                 <div key={version.id} className="rounded-[1.4rem] bg-mist/70 p-4">
-                  <div className="flex items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="font-semibold">Version {version.version_number}</p>
                       <p className="mt-1 text-xs text-ink/55">
                         {version.version_note || "No note"} · {new Date(version.created_at).toLocaleString()}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void restoreVersion(selectedWorkflowDetails.id, version.id)}
-                      className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
-                    >
-                      Restore
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id, "previous")}
-                      className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
-                    >
-                      Compare Previous
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id, "current")}
-                      className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
-                    >
-                      Compare Current
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void restoreVersion(selectedWorkflowDetails.id, version.id)}
+                        className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+                      >
+                        Restore
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id, "previous")}
+                        className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
+                      >
+                        Compare Previous
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void compareVersion(selectedWorkflowDetails.id, version.id, "current")}
+                        className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink"
+                      >
+                        Compare Current
+                      </button>
+                    </div>
                   </div>
                   {versionCompare?.version_id === version.id ? (
                     <div className="mt-3 rounded-2xl bg-white p-3 text-xs text-ink/62">

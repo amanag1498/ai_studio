@@ -199,6 +199,27 @@ class WorkflowSubflow(Base):
     created_by_user: Mapped["AppUser | None"] = relationship(foreign_keys=[created_by_user_id])
 
 
+class WorkflowPresence(Base):
+    __tablename__ = "workflow_presence"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "session_id", name="uq_workflow_presence_workflow_session"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    node_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    cursor_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    graph_version: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workflow: Mapped[Workflow] = relationship(foreign_keys=[workflow_id])
+    user: Mapped["AppUser | None"] = relationship(foreign_keys=[user_id])
+
+
 class RagEvaluation(Base):
     __tablename__ = "rag_evaluations"
 

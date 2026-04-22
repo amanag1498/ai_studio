@@ -39,8 +39,19 @@ def configure_opentelemetry(app: FastAPI) -> dict[str, Any]:
         return {"enabled": False, "reason": "optional_dependencies_missing"}
 
     provider = TracerProvider(resource=Resource.create({"service.name": settings.telemetry_service_name}))
-    provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    if settings.telemetry_console_exporter_enabled:
+        provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
     trace.set_tracer_provider(provider)
     FastAPIInstrumentor.instrument_app(app)
-    logger.info("opentelemetry_enabled", extra={"service_name": settings.telemetry_service_name})
-    return {"enabled": True, "service_name": settings.telemetry_service_name}
+    logger.info(
+        "opentelemetry_enabled",
+        extra={
+            "service_name": settings.telemetry_service_name,
+            "console_exporter_enabled": settings.telemetry_console_exporter_enabled,
+        },
+    )
+    return {
+        "enabled": True,
+        "service_name": settings.telemetry_service_name,
+        "console_exporter_enabled": settings.telemetry_console_exporter_enabled,
+    }
