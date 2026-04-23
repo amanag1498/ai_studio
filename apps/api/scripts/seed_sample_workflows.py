@@ -697,7 +697,11 @@ def sample_insurance_policy_text() -> str:
         "Flood damage is excluded unless a separate flood endorsement is active. Claims must be "
         "reported within 30 days of discovery. Emergency mitigation expenses are reimbursable "
         "when reasonable documentation is provided. Temporary housing is covered up to $15,000 "
-        "when the property is uninhabitable due to a covered loss."
+        "when the property is uninhabitable due to a covered loss. Matching siding is not covered "
+        "unless the damaged elevation cannot be repaired with reasonably similar materials. Mold "
+        "remediation is limited to $5,000 when caused by a covered water intrusion event and when "
+        "mitigation begins within 72 hours. The policy requires proof of loss, photos, contractor "
+        "estimate, and adjuster inspection before final payment."
     )
 
 
@@ -708,7 +712,11 @@ def sample_insurance_claim_text() -> str:
         "Cause of loss: wind storm damaged roof shingles and caused water intrusion in the attic. "
         "Estimated repair: roof $8,900; attic drywall $2,400; temporary tarp $450. "
         "Customer requests reimbursement and temporary housing guidance. No flood water observed. "
-        "Photos and contractor invoice are attached. Adjuster notes: verify deductible and coverage."
+        "Photos and contractor invoice are attached. Contractor notes mention missing shingles on the "
+        "west slope, lifted flashing, damp insulation, and active drying equipment installed on "
+        "2026-04-13. The home remained partially habitable, but the insured used a hotel for two "
+        "nights due to ceiling leak concerns. Adjuster notes: verify deductible, wind/hail coverage, "
+        "temporary housing eligibility, mold limit, and whether matching siding is implicated."
     )
 
 
@@ -1167,22 +1175,30 @@ def build_samples() -> list[dict[str, Any]]:
                 node("file_upload", "claim_files-1", 40, 310, {"defaultLocalPaths": "storage/sample_company_policy.txt", "multiple": True, "accept": ".pdf,.docx,.txt,.csv,.json", "maxSizeMb": 25}),
                 node("text_input", "policy_text-1", 40, 560, {"defaultText": sample_insurance_policy_text()}),
                 node("text_input", "claim_text-1", 40, 800, {"defaultText": sample_insurance_claim_text()}),
+                node("text_input", "weather_url-1", 40, 1040, {"defaultText": "https://example.com/weather/storm-report-2026-04-12"}),
                 node("text_extraction", "extract_files-1", 380, 310),
                 node("pii_redactor", "redact_files-1", 700, 310, {"redactEmails": True, "redactPhones": True}),
                 node("document_splitter", "split_policy-1", 380, 560, {"mode": "paragraphs", "maxChars": 700}),
                 node("table_extractor", "claim_tables-1", 380, 800, {"delimiter": "auto"}),
                 node("query_rewriter", "coverage_query-1", 700, 60, {"domainHint": "insurance coverage, deductible, exclusions, claim decision evidence"}),
+                node("web_search", "storm_search-1", 1030, 60, {"provider": "duckduckgo", "topK": 3}),
+                node("web_page_reader", "storm_reader-1", 380, 1040, {"url": "https://example.com/weather/storm-report-2026-04-12", "readerMode": "clean"}),
                 node("rag_knowledge", "policy_rag-1", 1030, 420, {"collection": "insurance-claims-coverage-policy", "chunkSize": 240, "overlap": 45, "topK": 6, "tags": "insurance,policy,coverage,claims"}),
                 node("rag_knowledge", "claim_rag-1", 1030, 700, {"collection": "insurance-claims-coverage-file", "chunkSize": 260, "overlap": 50, "topK": 5, "tags": "insurance,claim,evidence"}),
                 node("re_ranker", "policy_rerank-1", 1360, 420, {"strategy": "score_then_length", "topK": 5}),
                 node("re_ranker", "claim_rerank-1", 1360, 700, {"strategy": "score_then_length", "topK": 5}),
                 node("merge", "coverage_evidence-1", 1690, 560, {"mode": "append"}),
+                node("merge", "storm_evidence-1", 1360, 160, {"mode": "append"}),
+                node("merge", "complete_evidence-1", 1690, 300, {"mode": "append"}),
+                node("summarizer", "coverage_summary-1", 2020, 260, {"style": "adjuster coverage summary with policy clauses, claim facts, weather context, missing evidence, and next actions", "maxWords": 260}),
                 node("extraction_ai", "claim_extractor-1", 1030, 960, {"schemaPrompt": "Return JSON with keys: claim_number, policy_number, insured_name, loss_date, reported_date, cause_of_loss, damaged_items, estimated_amounts, deductible, coverage_flags, exclusions, missing_documents, recommended_decision, confidence"}),
                 node("schema_validator", "claim_schema-1", 1360, 960, {"requiredKeys": "claim_number\npolicy_number\nloss_date\ncause_of_loss\nrecommended_decision\nconfidence"}),
                 node("classifier", "coverage_classifier-1", 1360, 1180, {"labels": "covered\npartially_covered\nexcluded\nneeds_adjuster_review\nmissing_documents\nfraud_review"}),
                 node("condition", "review_condition-1", 1690, 1020, {"expression": "contains:needs"}),
                 node("conversation_memory", "claim_memory-1", 1690, 1240, {"namespace": "insurance-claims-desk", "windowSize": 10}),
-                node("chatbot", "coverage_chatbot-1", 2020, 560, {"systemPrompt": "You are an insurance coverage analyst. Use only policy and claim evidence. Explain likely coverage, deductible, exclusions, missing documents, and next adjuster actions with citations.", "answerStyle": "coverage decision memo"}),
+                node("long_term_memory", "claim_fact_memory-1", 2020, 1240, {"scope": "insurance-claim-coverage-facts", "maxFacts": 40}),
+                node("chatbot", "coverage_chatbot-1", 2020, 560, {"systemPrompt": "You are an insurance coverage analyst. Use only policy, claim, and weather/context evidence. Explain likely coverage, deductible, limits, exclusions, temporary housing, missing documents, confidence, and next adjuster actions with citations. Avoid final legal/coverage guarantees.", "answerStyle": "coverage decision memo"}),
+                node("guardrail", "decision_guardrail-1", 2350, 350, {"blockedTerms": "guaranteed payment\nfinal denial\nlegal advice\nbad faith"}),
                 node("citation_verifier", "coverage_verifier-1", 2350, 560, {"minimumSupport": 0.45}),
                 node("citation_formatter", "citation_formatter-1", 2350, 780, {"style": "numbered"}),
                 node("approval_step", "supervisor_approval-1", 2020, 1020, {"defaultDecision": "approved"}),
@@ -1201,32 +1217,43 @@ def build_samples() -> list[dict[str, Any]]:
                 edge("extract_files-1", "document", "redact_files-1", "content", "redact uploaded evidence"),
                 edge("policy_text-1", "text", "split_policy-1", "document", "policy sections"),
                 edge("claim_text-1", "text", "claim_tables-1", "document", "claim tables"),
+                edge("weather_url-1", "text", "storm_reader-1", "url", "storm report page"),
                 edge("split_policy-1", "sections", "policy_rag-1", "document", "ingest policy"),
                 edge("redact_files-1", "redacted", "claim_rag-1", "document", "ingest uploaded evidence"),
                 edge("claim_text-1", "text", "claim_rag-1", "document", "ingest claim notice"),
                 edge("coverage_query-1", "query", "policy_rag-1", "query", "policy retrieval"),
                 edge("coverage_query-1", "query", "claim_rag-1", "query", "claim retrieval"),
+                edge("coverage_query-1", "query", "storm_search-1", "query", "storm search"),
                 edge("policy_rag-1", "knowledge", "policy_rerank-1", "knowledge", "rank policy"),
                 edge("claim_rag-1", "knowledge", "claim_rerank-1", "knowledge", "rank claim"),
                 edge("policy_rerank-1", "knowledge", "coverage_evidence-1", "left", "policy evidence"),
                 edge("claim_rerank-1", "knowledge", "coverage_evidence-1", "right", "claim evidence"),
+                edge("storm_search-1", "results", "storm_evidence-1", "left", "storm search evidence"),
+                edge("storm_reader-1", "document", "storm_evidence-1", "right", "storm page evidence"),
+                edge("coverage_evidence-1", "merged", "complete_evidence-1", "left", "policy and claim evidence"),
+                edge("storm_evidence-1", "merged", "complete_evidence-1", "right", "external context"),
+                edge("complete_evidence-1", "merged", "coverage_summary-1", "content", "adjuster summary"),
                 edge("claim_text-1", "text", "claim_extractor-1", "content", "claim extraction"),
                 edge("claim_extractor-1", "json", "claim_schema-1", "payload", "validate claim fields"),
                 edge("claim_text-1", "text", "coverage_classifier-1", "content", "coverage classification"),
                 edge("coverage_classifier-1", "classification", "review_condition-1", "value", "review branch"),
                 edge("claim_form-1", "text", "claim_memory-1", "message", "remember claim request"),
+                edge("coverage_summary-1", "summary", "claim_fact_memory-1", "content", "remember stable claim facts"),
                 edge("coverage_query-1", "query", "coverage_chatbot-1", "message", "coverage prompt"),
-                edge("coverage_evidence-1", "merged", "coverage_chatbot-1", "context", "coverage evidence"),
+                edge("complete_evidence-1", "merged", "coverage_chatbot-1", "context", "complete evidence"),
                 edge("claim_memory-1", "memory", "coverage_chatbot-1", "context", "claim session memory"),
-                edge("coverage_chatbot-1", "reply", "coverage_verifier-1", "answer", "verify decision"),
-                edge("coverage_evidence-1", "merged", "coverage_verifier-1", "sources", "verify sources"),
-                edge("coverage_evidence-1", "merged", "citation_formatter-1", "sources", "format citations"),
+                edge("claim_fact_memory-1", "memory", "coverage_chatbot-1", "context", "durable claim memory"),
+                edge("coverage_chatbot-1", "reply", "decision_guardrail-1", "content", "guardrail decision language"),
+                edge("decision_guardrail-1", "safe", "coverage_verifier-1", "answer", "verify safe decision"),
+                edge("complete_evidence-1", "merged", "coverage_verifier-1", "sources", "verify sources"),
+                edge("complete_evidence-1", "merged", "citation_formatter-1", "sources", "format citations"),
                 edge("review_condition-1", "true", "supervisor_approval-1", "request", "needs supervisor"),
                 edge("claim_extractor-1", "json", "claim_record-1", "row", "persist claim"),
                 edge("claim_extractor-1", "json", "claim_export-1", "data", "export claim"),
                 edge("supervisor_approval-1", "approved", "claim_email-1", "content", "email supervisor"),
                 edge("supervisor_approval-1", "approved", "claim_slack-1", "content", "notify claims"),
-                edge("coverage_chatbot-1", "reply", "claim_chat_output-1", "message", "coverage answer"),
+                edge("decision_guardrail-1", "safe", "claim_chat_output-1", "message", "coverage answer"),
+                edge("coverage_summary-1", "summary", "claim_dashboard-1", "content", "coverage dashboard"),
                 edge("coverage_verifier-1", "verification", "claim_dashboard-1", "content", "quality dashboard"),
                 edge("coverage_chatbot-1", "json", "claim_json-1", "payload", "coverage JSON"),
                 edge("claim_record-1", "record", "claim_logger-1", "payload", "claim audit"),
@@ -1351,14 +1378,20 @@ def upsert_workflow(session, graph_json: dict[str, Any]) -> Workflow:
         existing = session.scalar(select(Workflow).where(Workflow.name == graph_json["name"]))
 
     if existing is None:
-        return create_workflow(
+        workflow = create_workflow(
             session,
             name=graph_json["name"],
             description=SEED_DESCRIPTION,
             validated_graph=validated,
         )
+        workflow.is_template = True
+        workflow.template_scope = "system"
+        session.add(workflow)
+        session.commit()
+        session.refresh(workflow)
+        return workflow
 
-    return update_workflow(
+    workflow = update_workflow(
         session,
         get_workflow_or_404(session, existing.id),
         name=graph_json["name"],
@@ -1366,6 +1399,12 @@ def upsert_workflow(session, graph_json: dict[str, Any]) -> Workflow:
         status_value="draft",
         validated_graph=validated,
     )
+    workflow.is_template = True
+    workflow.template_scope = "system"
+    session.add(workflow)
+    session.commit()
+    session.refresh(workflow)
+    return workflow
 
 
 def reset_seeded_workflows(session) -> None:

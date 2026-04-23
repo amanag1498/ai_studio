@@ -16,6 +16,7 @@ AI Studio is a local-first visual workflow builder for document, RAG, chatbot, e
 - Publish chat workflows as local chatbot endpoints and test them through `/chat/:slug`.
 - Manage workflows from a premium AI Studio home shell with tabs for Workflows, Create, Templates, Usage, Runs, Publish, Files, Knowledge, Components, Blocks, Health, Bundles, and Account.
 - Track local users, signup/login activity, workflow ownership, run ownership, usage stats, audit logs, published endpoints, and workflow permissions.
+- Manage workspace/team boundaries with admin-created workspaces, member roles, default user workspaces, workflow workspace ownership, and quota visibility for workflows, runs, storage, and members.
 - Stream workflow execution updates through the async run queue and Server-Sent Events, with queue monitoring, cancellation, durable SQLite run state, and configurable retries/backoff.
 - Upload documents into a global File Library before building/running workflows, then reuse those files in Builder and App Run file inputs.
 - Add workflow comments, inspect change history, and save reusable subflow/components from workflow Activity panels or directly from selected Builder blocks.
@@ -147,10 +148,35 @@ Admins can view and manage all workflows, admin usage dashboards, audit logs, ob
 
 The first admin can be created from the `Create Admin` tab without a setup token. After an admin exists, set `ADMIN_SETUP_TOKEN` in the backend `.env` and enter that token in the `Create Admin` form to create additional admin profiles.
 
+Each local user receives a default workspace. Admins can create additional workspaces and add local users as `viewer`, `runner`, `editor`, or `owner` from the dedicated `Workspaces` page. The top bar always shows the active workspace, and create/import/template flows ask for or default to that selected workspace so new workflows do not silently land in the wrong team.
+
+Regular users only see workflows they created, workflows in workspaces where they are members, or workflows explicitly shared with them. Legacy/unowned seeded workflows stay available through the Templates gallery, not as normal user-owned workflows. Admins retain global visibility across all workflows and templates.
+
+Workspace quotas are enforced for workflow creation and workflow runs. If a workspace approaches 80%, 90%, or 100% of workflow/run/storage limits, the UI shows warning chips; if it reaches the workflow or 30-day run limit, the API blocks the action with a clear error until an owner/admin increases the limit or usage drops.
+
+Published chatbot endpoints support three visibility modes:
+
+- `public`: anyone with the local link can open the published chatbot.
+- `workspace_only`: the caller must be logged in as a member of the workflow workspace.
+- `token_protected`: a secure token is generated/regenerated from the Publish manager and must be sent in the `X-Publish-Token` header or publish metadata.
+
+Templates are treated separately from normal workflows. Seeded examples are system templates, appear in `Templates`, and cloning a template creates a new user/workspace-owned workflow.
+
 ```text
 POST /auth/signup        # creates a standard user
 POST /auth/login         # logs in an existing user
 POST /auth/admin/create  # creates an admin; token required after first admin
+GET  /workspaces         # lists visible workspaces with usage and members
+POST /workspaces         # admin creates a workspace
+PATCH /workspaces/{id}   # owner/admin updates workspace limits and metadata
+POST /workspaces/{id}/default
+POST /workspaces/{id}/members
+DELETE /workspaces/{id}/members/{membership_id}
+GET  /workspaces/{id}/audit-logs
+GET  /admin/users
+PATCH /admin/users/{user_id}
+POST /workflows/{id}/publish         # accepts visibility: public | workspace_only | token_protected
+POST /workflows/{id}/publish/token   # regenerates token-protected access token
 ```
 
 ## Main Pages
@@ -436,13 +462,15 @@ These directories are intentionally ignored by Git except `.gitkeep` placeholder
 - `Templates`: polished gallery for seeded advanced workflow templates.
 - `Usage`: admin usage dashboard with users, auth events, workflow runs, failures, files, RAG chunks, latency, audit events, and observability metrics.
 - `Runs`: cross-workflow execution history with statuses, timings, errors, owner/session metadata, and links to clean run detail pages.
-- `Publish`: published chatbot manager with chat links, API snippets, iframe embeds, copy actions, unpublish, and app preview.
+- `Publish`: published chatbot manager with public/workspace-only/token-protected visibility, token regeneration, chat links, API snippets, iframe embeds, copy actions, unpublish, and app preview.
 - `Files`: global File Library upload and inventory for documents reusable in Builder and App Run file inputs.
 - `Knowledge`: global RAG collection inventory with chunk/document counts, ingest freshness, retrieval testing, and workflow links.
 - `Components`: saved reusable subflows/components with graph JSON copy and source workflow links.
 - `Blocks`: schema-driven block marketplace with ports and config metadata.
 - `Health`: backend, storage, OpenRouter, Chroma, embeddings, SQLite, and environment readiness checks.
 - `Bundles`: workflow bundle export/import for review and backup.
+- `Workspaces`: first-class workspace switcher, members, quotas, usage, workflow access, default workspace selection, and workspace audit log.
+- `Users`: admin-only user search, role changes, activate/deactivate controls, and default workspace assignment.
 - `Account`: local-first signup/login/logout so ownership and permissions are tracked.
 
 ## Recommended Next Improvements

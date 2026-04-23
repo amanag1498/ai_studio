@@ -7,12 +7,15 @@ from pydantic import BaseModel, Field
 
 class PublishWorkflowRequest(BaseModel):
     slug: str | None = Field(default=None, max_length=255)
+    visibility: str = Field(default="public", max_length=50)
 
 
 class PublishWorkflowResponse(BaseModel):
     workflow_id: int
     slug: str
     is_published: bool
+    visibility: str = "public"
+    access_token: str | None = None
     chat_endpoint: str
 
 

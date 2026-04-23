@@ -21,6 +21,13 @@ export type WorkflowSummary = {
   latest_saved_version: number;
   is_published: boolean;
   published_slug: string | null;
+  published_visibility: string;
+  is_template: boolean;
+  template_scope: string | null;
+  workspace_id: number | null;
+  workspace_name: string | null;
+  effective_role: string | null;
+  effective_role_source: string | null;
   created_by_user_id: number | null;
   updated_by_user_id: number | null;
   archived_at: string | null;
@@ -62,15 +69,65 @@ export type AppUser = {
   email: string;
   display_name: string;
   role: string;
+  default_workspace_id: number | null;
   is_active: boolean;
   created_at: string;
   last_login_at: string | null;
+};
+
+export type WorkspaceMember = {
+  id: number;
+  user_id: number;
+  email: string;
+  display_name: string;
+  app_role: string;
+  role: string;
+  created_at: string;
+};
+
+export type WorkspaceRecord = {
+  id: number;
+  name: string;
+  slug: string;
+  description: string | null;
+  workflow_limit: number;
+  monthly_run_limit: number;
+  storage_limit_mb: number;
+  created_by_user_id: number | null;
+  created_at: string;
+  updated_at: string;
+  current_user_role: string | null;
+  usage: {
+    workflow_count: number;
+    run_count: number;
+    runs_last_30d: number;
+    storage_bytes: number;
+    member_count: number;
+  };
+  members: WorkspaceMember[];
+};
+
+export type WorkspaceAuditLogRecord = {
+  id: number;
+  actor_user_id: number | null;
+  target_type: string | null;
+  target_id: string | null;
+  workspace_id: number;
+  action: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
 };
 
 export type AuthResponse = {
   user: AppUser;
   local_session_token: string;
   message: string;
+};
+
+export type AdminUserUpdate = {
+  role?: "admin" | "user";
+  is_active?: boolean;
+  default_workspace_id?: number;
 };
 
 export type UsageDashboard = {
@@ -320,6 +377,8 @@ export type PublishWorkflowResponse = {
   workflow_id: number;
   slug: string;
   is_published: boolean;
+  visibility: string;
+  access_token: string | null;
   chat_endpoint: string;
 };
 
@@ -466,25 +525,38 @@ export function listWorkflowTemplates() {
   return requestJson<WorkflowSummary[]>("/workflow-templates");
 }
 
-export function createWorkflowFromTemplate(workflowId: number) {
-  return requestJson<WorkflowRecord>(`/workflow-templates/${workflowId}/create`, { method: "POST", body: JSON.stringify({}) });
+export function getSelectedWorkspaceId() {
+  try {
+    const value = localStorage.getItem("ai-studio-active-workspace-id");
+    return value ? Number(value) || undefined : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-export function createWorkflow(graph: BuilderGraph) {
+export function createWorkflowFromTemplate(workflowId: number, workspaceId = getSelectedWorkspaceId()) {
+  return requestJson<WorkflowRecord>(`/workflow-templates/${workflowId}/create`, {
+    method: "POST",
+    body: JSON.stringify(workspaceId ? { workspace_id: workspaceId } : {}),
+  });
+}
+
+export function createWorkflow(graph: BuilderGraph, workspaceId = getSelectedWorkspaceId()) {
   return requestJson<WorkflowRecord>("/workflows", {
     method: "POST",
     body: JSON.stringify({
       name: graph.name,
       description: "Builder workflow saved from the React Flow canvas.",
       graph,
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
     }),
   });
 }
 
-export function autoBuildWorkflow(payload: { prompt: string; name?: string }) {
+export function autoBuildWorkflow(payload: { prompt: string; name?: string; workspace_id?: number }) {
   return requestJson<WorkflowRecord>("/workflows/autobuild", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, ...(payload.workspace_id ? {} : getSelectedWorkspaceId() ? { workspace_id: getSelectedWorkspaceId() } : {}) }),
   });
 }
 
@@ -555,8 +627,15 @@ export function getWorkflowRun(workflowId: number, runId: number) {
   return requestJson<WorkflowRunRecord>(`/workflows/${workflowId}/runs/${runId}`);
 }
 
-export function publishWorkflow(workflowId: number) {
+export function publishWorkflow(workflowId: number, visibility = "public") {
   return requestJson<PublishWorkflowResponse>(`/workflows/${workflowId}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ visibility }),
+  });
+}
+
+export function regeneratePublishToken(workflowId: number) {
+  return requestJson<PublishWorkflowResponse>(`/workflows/${workflowId}/publish/token`, {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -612,6 +691,61 @@ export function createAdmin(payload: { email: string; display_name: string; pass
 export function login(payload: { email: string; password: string }) {
   return requestJson<AuthResponse>("/auth/login", {
     method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listWorkspaces() {
+  return requestJson<WorkspaceRecord[]>("/workspaces");
+}
+
+export function createWorkspace(payload: { name: string; description?: string; workflow_limit?: number; monthly_run_limit?: number; storage_limit_mb?: number }) {
+  return requestJson<WorkspaceRecord>("/workspaces", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateWorkspace(workspaceId: number, payload: { name?: string; description?: string; workflow_limit?: number; monthly_run_limit?: number; storage_limit_mb?: number }) {
+  return requestJson<WorkspaceRecord>(`/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function setDefaultWorkspace(workspaceId: number) {
+  return requestJson<AppUser>(`/workspaces/${workspaceId}/default`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function addWorkspaceMember(workspaceId: number, payload: { email: string; role: string }) {
+  return requestJson<WorkspaceMember>(`/workspaces/${workspaceId}/members`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteWorkspaceMember(workspaceId: number, membershipId: number) {
+  return requestJson<{ deleted: boolean; membership_id: number }>(`/workspaces/${workspaceId}/members/${membershipId}`, {
+    method: "DELETE",
+  });
+}
+
+export function listWorkspaceAuditLogs(workspaceId: number, limit = 50) {
+  return requestJson<WorkspaceAuditLogRecord[]>(`/workspaces/${workspaceId}/audit-logs?limit=${limit}`);
+}
+
+export function listAdminUsers(search = "") {
+  const params = new URLSearchParams();
+  if (search.trim()) params.set("search", search.trim());
+  return requestJson<AppUser[]>(`/admin/users${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export function updateAdminUser(userId: number, payload: AdminUserUpdate) {
+  return requestJson<AppUser>(`/admin/users/${userId}`, {
+    method: "PATCH",
     body: JSON.stringify(payload),
   });
 }
@@ -749,10 +883,10 @@ export function exportWorkflowBundle(workflowId: number) {
   return requestJson<Record<string, unknown>>(`/workflows/${workflowId}/bundle`);
 }
 
-export function importWorkflowBundle(bundle: Record<string, unknown>) {
+export function importWorkflowBundle(bundle: Record<string, unknown>, workspaceId = getSelectedWorkspaceId()) {
   return requestJson<WorkflowRecord>("/workflows/import-bundle", {
     method: "POST",
-    body: JSON.stringify(bundle),
+    body: JSON.stringify({ ...bundle, ...(workspaceId ? { workspace_id: workspaceId } : {}) }),
   });
 }
 

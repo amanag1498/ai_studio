@@ -1,22 +1,33 @@
 from __future__ import annotations
 
 import re
+import secrets
+import hashlib
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.workflow import Workflow
+from app.models.workflow import Workflow, WorkspaceMembership
 from app.schemas.execution import ExecuteWorkflowRequest, RuntimeNodeInput
 from app.schemas.publish import PublishedChatRequest
 from app.services.execution import execute_workflow
 from app.services.workflows import get_workflow_or_404
 
 
-def publish_workflow(session: Session, workflow_id: int, slug: str | None) -> Workflow:
+def hash_publish_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_publish_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def publish_workflow(session: Session, workflow_id: int, slug: str | None, *, visibility: str = "public") -> tuple[Workflow, str | None]:
     workflow = get_workflow_or_404(session, workflow_id)
     resolved_slug = slugify(slug or workflow.name or f"workflow-{workflow.id}")
+    visibility = visibility if visibility in {"public", "workspace_only", "token_protected"} else "public"
 
     existing = session.scalar(
         select(Workflow).where(Workflow.published_slug == resolved_slug, Workflow.id != workflow.id)
@@ -29,10 +40,15 @@ def publish_workflow(session: Session, workflow_id: int, slug: str | None) -> Wo
 
     workflow.is_published = True
     workflow.published_slug = resolved_slug
+    workflow.published_visibility = visibility
+    access_token = None
+    if visibility == "token_protected" and not workflow.publish_token_hash:
+        access_token = generate_publish_token()
+        workflow.publish_token_hash = hash_publish_token(access_token)
     session.add(workflow)
     session.commit()
     session.refresh(workflow)
-    return workflow
+    return workflow, access_token
 
 
 def get_published_workflow_or_404(session: Session, slug: str) -> Workflow:
@@ -42,6 +58,30 @@ def get_published_workflow_or_404(session: Session, slug: str) -> Workflow:
     if workflow is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Published chatbot not found.")
     return workflow
+
+
+def validate_published_access(session: Session, workflow: Workflow, *, user_id: int | None = None, token: str | None = None) -> None:
+    if workflow.published_visibility == "public":
+        return
+    if workflow.published_visibility == "token_protected":
+        if token and workflow.publish_token_hash and hash_publish_token(token) == workflow.publish_token_hash:
+            return
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Valid publish token is required.")
+    if workflow.published_visibility == "workspace_only":
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Workspace login is required.")
+        if workflow.created_by_user_id == user_id or workflow.updated_by_user_id == user_id:
+            return
+        if workflow.workspace_id is not None:
+            membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.workspace_id == workflow.workspace_id,
+                    WorkspaceMembership.user_id == user_id,
+                )
+            )
+            if membership is not None:
+                return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This published workflow is workspace-only.")
 
 
 def execute_published_chat_message(

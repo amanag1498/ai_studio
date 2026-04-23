@@ -21,10 +21,15 @@ class Workflow(Base):
     )
     is_published: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="0")
     published_slug: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    published_visibility: Mapped[str] = mapped_column(String(50), nullable=False, default="public", server_default="public")
+    publish_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_template: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="0", index=True)
+    template_scope: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     published_version_id: Mapped[int | None] = mapped_column(
         ForeignKey("workflow_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True)
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
     updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True, index=True)
@@ -89,6 +94,7 @@ class Workflow(Base):
         foreign_keys=[published_version_id],
         post_update=True,
     )
+    workspace: Mapped["Workspace | None"] = relationship(back_populates="workflows", foreign_keys=[workspace_id])
     created_by_user: Mapped["AppUser | None"] = relationship(foreign_keys=[created_by_user_id])
     updated_by_user: Mapped["AppUser | None"] = relationship(foreign_keys=[updated_by_user_id])
     permissions: Mapped[list["WorkflowPermission"]] = relationship(
@@ -132,6 +138,49 @@ class WorkflowPermission(Base):
 
     workflow: Mapped[Workflow] = relationship(back_populates="permissions", foreign_keys=[workflow_id])
     user: Mapped["AppUser"] = relationship(foreign_keys=[user_id])
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_workspaces_slug"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    workflow_limit: Mapped[int] = mapped_column(Integer(), nullable=False, default=100, server_default="100")
+    monthly_run_limit: Mapped[int] = mapped_column(Integer(), nullable=False, default=1000, server_default="1000")
+    storage_limit_mb: Mapped[int] = mapped_column(Integer(), nullable=False, default=2048, server_default="2048")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    created_by_user: Mapped["AppUser | None"] = relationship(foreign_keys=[created_by_user_id])
+    memberships: Mapped[list["WorkspaceMembership"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        foreign_keys="WorkspaceMembership.workspace_id",
+        order_by=lambda: WorkspaceMembership.id.desc(),
+    )
+    workflows: Mapped[list["Workflow"]] = relationship(back_populates="workspace", foreign_keys="Workflow.workspace_id")
+
+
+class WorkspaceMembership(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_memberships_workspace_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="member", server_default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now(), index=True)
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="memberships", foreign_keys=[workspace_id])
+    user: Mapped["AppUser"] = relationship(back_populates="workspace_memberships", foreign_keys=[user_id])
 
 
 class AuditLog(Base):
@@ -481,6 +530,7 @@ class AppUser(Base):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="user", server_default="user")
+    default_workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(), nullable=False, server_default=func.now())
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
@@ -490,6 +540,13 @@ class AppUser(Base):
         cascade="all, delete-orphan",
         foreign_keys="AuthEvent.user_id",
         order_by=lambda: AuthEvent.id.desc(),
+    )
+    default_workspace: Mapped["Workspace | None"] = relationship(foreign_keys=[default_workspace_id])
+    workspace_memberships: Mapped[list["WorkspaceMembership"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="WorkspaceMembership.user_id",
+        order_by=lambda: WorkspaceMembership.id.desc(),
     )
 
 

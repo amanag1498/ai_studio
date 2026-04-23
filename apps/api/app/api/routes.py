@@ -28,8 +28,10 @@ from app.models.workflow import (
     WorkflowRun,
     WorkflowSubflow,
     WorkflowVersion,
+    Workspace,
+    WorkspaceMembership,
 )
-from app.schemas.auth import AdminCreateRequest, AppUserRead, AuthResponse, UserLoginRequest, UserSignupRequest
+from app.schemas.auth import AdminCreateRequest, AdminUserUpdate, AppUserRead, AuthResponse, UserLoginRequest, UserSignupRequest
 from app.schemas.execution import ExecuteWorkflowRequest, WorkflowRunRead
 from app.schemas.publish import (
     PublishWorkflowRequest,
@@ -49,6 +51,7 @@ from app.schemas.workflows import (
     WorkflowVersionCreate,
     WorkflowVersionRead,
 )
+from app.schemas.workspaces import WorkspaceCreate, WorkspaceMemberCreate, WorkspaceMemberRead, WorkspaceRead, WorkspaceUpdate
 from app.services.admin import get_usage_dashboard
 from app.services.auth import create_local_session_token, create_local_user, has_admin_user, login_local_user
 from app.services.execution import ExecutionContext, TypedPayload, execute_node, execute_workflow, get_run_or_404, typed_payload
@@ -61,8 +64,11 @@ from app.services.vector_store import get_default_vector_store
 from app.services.publish import (
     execute_published_chat_message,
     extract_chatbot_response_from_run,
+    generate_publish_token,
     get_published_workflow_or_404,
+    hash_publish_token,
     publish_workflow,
+    validate_published_access,
 )
 from app.services.workflows import (
     archive_workflow,
@@ -74,6 +80,15 @@ from app.services.workflows import (
     save_workflow_version,
     update_workflow,
     validate_graph,
+)
+from app.services.workspaces import (
+    ensure_user_workspace,
+    ensure_workspace_can_create_workflow,
+    ensure_workspace_can_run,
+    get_user_workspace_ids,
+    get_workspace_usage,
+    set_default_workspace,
+    unique_workspace_slug,
 )
 
 router = APIRouter()
@@ -101,7 +116,115 @@ def require_admin_user(current_user: AppUser | None = Depends(get_current_user))
     return current_user
 
 
-ROLE_RANK = {"viewer": 1, "runner": 2, "editor": 3, "owner": 4}
+def require_current_user(current_user: AppUser | None = Depends(get_current_user)) -> AppUser:
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login is required.")
+    return current_user
+
+
+ROLE_RANK = {"viewer": 1, "member": 1, "runner": 2, "editor": 3, "admin": 4, "owner": 4}
+
+
+def workspace_member_payload(membership: WorkspaceMembership) -> WorkspaceMemberRead:
+    return WorkspaceMemberRead(
+        id=membership.id,
+        user_id=membership.user_id,
+        email=membership.user.email,
+        display_name=membership.user.display_name,
+        app_role=membership.user.role,
+        role=membership.role,
+        created_at=membership.created_at,
+    )
+
+
+def workspace_payload(db: Session, workspace: Workspace, current_user: AppUser | None = None) -> WorkspaceRead:
+    current_membership = None
+    if current_user is not None:
+        current_membership = db.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == workspace.id,
+                WorkspaceMembership.user_id == current_user.id,
+            )
+        )
+    members = list(
+        db.scalars(
+            select(WorkspaceMembership)
+            .where(WorkspaceMembership.workspace_id == workspace.id)
+            .order_by(WorkspaceMembership.created_at.desc(), WorkspaceMembership.id.desc())
+        )
+    )
+    return WorkspaceRead(
+        id=workspace.id,
+        name=workspace.name,
+        slug=workspace.slug,
+        description=workspace.description,
+        workflow_limit=workspace.workflow_limit,
+        monthly_run_limit=workspace.monthly_run_limit,
+        storage_limit_mb=workspace.storage_limit_mb,
+        created_by_user_id=workspace.created_by_user_id,
+        created_at=workspace.created_at,
+        updated_at=workspace.updated_at,
+        current_user_role="admin" if current_user and current_user.role == "admin" else (current_membership.role if current_membership else None),
+        usage=get_workspace_usage(db, workspace.id),
+        members=[workspace_member_payload(member) for member in members],
+    )
+
+
+def get_authorized_workspace(db: Session, workspace_id: int, current_user: AppUser, *, required_role: str = "viewer") -> Workspace:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found.")
+    if current_user.role == "admin":
+        return workspace
+    membership = db.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.user_id == current_user.id,
+        )
+    )
+    if membership and ROLE_RANK.get(membership.role, 0) >= ROLE_RANK.get(required_role, 1):
+        return workspace
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this workspace.")
+
+
+def default_workspace_for_user(db: Session, user_id: int | None) -> Workspace | None:
+    if user_id is None:
+        return None
+    current_user = db.get(AppUser, user_id)
+    if current_user is None:
+        return None
+    return ensure_user_workspace(db, current_user)
+
+
+def workflow_effective_role(db: Session, workflow: Workflow, current_user_id: int | None) -> tuple[str | None, str | None]:
+    if current_user_id is None:
+        return (None, None)
+    current_user = db.get(AppUser, current_user_id)
+    if current_user is None:
+        return (None, None)
+    if current_user.role == "admin":
+        return ("Admin", "admin")
+    if workflow.created_by_user_id == current_user_id:
+        return ("Owner", "owner")
+    permission = db.scalar(
+        select(WorkflowPermission).where(
+            WorkflowPermission.workflow_id == workflow.id,
+            WorkflowPermission.user_id == current_user_id,
+        )
+    )
+    if permission is not None:
+        return (f"Shared {permission.role.title()}", "direct_share")
+    if workflow.workspace_id is not None:
+        membership = db.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == workflow.workspace_id,
+                WorkspaceMembership.user_id == current_user_id,
+            )
+        )
+        if membership is not None:
+            label = "Workspace Owner" if membership.role == "owner" else f"Workspace {membership.role.title()}"
+            return (label, "workspace")
+    return (None, None)
 
 
 def ensure_workflow_access(
@@ -118,8 +241,17 @@ def ensure_workflow_access(
     current_user = db.get(AppUser, current_user_id)
     if current_user and current_user.role == "admin":
         return
-    if workflow.created_by_user_id in {None, current_user_id} or workflow.updated_by_user_id == current_user_id:
+    if workflow.created_by_user_id == current_user_id or workflow.updated_by_user_id == current_user_id:
         return
+    if workflow.workspace_id is not None:
+        membership = db.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == workflow.workspace_id,
+                WorkspaceMembership.user_id == current_user_id,
+            )
+        )
+        if membership and ROLE_RANK.get(membership.role, 0) >= ROLE_RANK.get(required_role, 1):
+            return
     permission = db.scalar(
         select(WorkflowPermission).where(
             WorkflowPermission.workflow_id == workflow.id,
@@ -143,7 +275,7 @@ def get_authorized_workflow(
     return workflow
 
 
-def workflow_summary_payload(db: Session, workflow: Workflow) -> dict:
+def workflow_summary_payload(db: Session, workflow: Workflow, current_user_id: int | None = None) -> dict:
     runs = list(
         db.scalars(
             select(WorkflowRun)
@@ -196,6 +328,7 @@ def workflow_summary_payload(db: Session, workflow: Workflow) -> dict:
         else "automation"
     )
     quality_score = round((sum(1 for value in quality_checks.values() if value) / len(quality_checks)) * 100)
+    effective_role, effective_role_source = workflow_effective_role(db, workflow, current_user_id)
     return {
         "id": workflow.id,
         "name": workflow.name,
@@ -205,6 +338,13 @@ def workflow_summary_payload(db: Session, workflow: Workflow) -> dict:
         "latest_saved_version": workflow.latest_saved_version,
         "is_published": workflow.is_published,
         "published_slug": workflow.published_slug,
+        "published_visibility": workflow.published_visibility,
+        "is_template": workflow.is_template,
+        "template_scope": workflow.template_scope,
+        "workspace_id": workflow.workspace_id,
+        "workspace_name": workflow.workspace.name if workflow.workspace else None,
+        "effective_role": effective_role,
+        "effective_role_source": effective_role_source,
         "created_by_user_id": workflow.created_by_user_id,
         "updated_by_user_id": workflow.updated_by_user_id,
         "archived_at": workflow.archived_at,
@@ -635,6 +775,250 @@ def login_route(payload: UserLoginRequest, db: Session = Depends(get_db)) -> Aut
     )
 
 
+@router.get("/workspaces", response_model=list[WorkspaceRead], tags=["workspaces"])
+def list_workspaces_route(
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_current_user),
+) -> list[WorkspaceRead]:
+    if current_user.role == "admin":
+        workspaces = list(db.scalars(select(Workspace).order_by(Workspace.updated_at.desc(), Workspace.id.desc())))
+    else:
+        workspaces = list(
+            db.scalars(
+                select(Workspace)
+                .join(WorkspaceMembership, WorkspaceMembership.workspace_id == Workspace.id)
+                .where(WorkspaceMembership.user_id == current_user.id)
+                .order_by(Workspace.updated_at.desc(), Workspace.id.desc())
+            )
+        )
+    return [workspace_payload(db, workspace, current_user) for workspace in workspaces]
+
+
+@router.post("/workspaces", response_model=WorkspaceRead, status_code=status.HTTP_201_CREATED, tags=["workspaces"])
+def create_workspace_route(
+    payload: WorkspaceCreate,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_admin_user),
+) -> WorkspaceRead:
+    workspace = Workspace(
+        name=payload.name.strip(),
+        slug=unique_workspace_slug(db, payload.name),
+        description=payload.description,
+        workflow_limit=payload.workflow_limit,
+        monthly_run_limit=payload.monthly_run_limit,
+        storage_limit_mb=payload.storage_limit_mb,
+        created_by_user_id=current_user.id,
+    )
+    db.add(workspace)
+    db.flush()
+    db.add(WorkspaceMembership(workspace_id=workspace.id, user_id=current_user.id, role="owner"))
+    audit_event(db, action="workspace_created", event_type="workspace", user_id=current_user.id, resource_type="workspace", resource_id=str(workspace.id), metadata={"name": workspace.name})
+    db.commit()
+    db.refresh(workspace)
+    return workspace_payload(db, workspace, current_user)
+
+
+@router.patch("/workspaces/{workspace_id}", response_model=WorkspaceRead, tags=["workspaces"])
+def update_workspace_route(
+    workspace_id: int,
+    payload: WorkspaceUpdate,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_current_user),
+) -> WorkspaceRead:
+    workspace = get_authorized_workspace(db, workspace_id, current_user, required_role="owner")
+    if payload.name is not None:
+        workspace.name = payload.name.strip()
+    if payload.description is not None:
+        workspace.description = payload.description
+    if payload.workflow_limit is not None:
+        workspace.workflow_limit = payload.workflow_limit
+    if payload.monthly_run_limit is not None:
+        workspace.monthly_run_limit = payload.monthly_run_limit
+    if payload.storage_limit_mb is not None:
+        workspace.storage_limit_mb = payload.storage_limit_mb
+    db.add(workspace)
+    audit_event(db, action="workspace_updated", event_type="workspace", user_id=current_user.id, resource_type="workspace", resource_id=str(workspace.id), metadata=payload.model_dump(exclude_none=True))
+    db.commit()
+    db.refresh(workspace)
+    return workspace_payload(db, workspace, current_user)
+
+
+@router.post("/workspaces/{workspace_id}/default", response_model=AppUserRead, tags=["workspaces"])
+def set_default_workspace_route(
+    workspace_id: int,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_current_user),
+) -> AppUserRead:
+    workspace = get_authorized_workspace(db, workspace_id, current_user, required_role="viewer")
+    return AppUserRead.model_validate(set_default_workspace(db, current_user, workspace))
+
+
+@router.post("/workspaces/{workspace_id}/members", response_model=WorkspaceMemberRead, status_code=status.HTTP_201_CREATED, tags=["workspaces"])
+def add_workspace_member_route(
+    workspace_id: int,
+    payload: WorkspaceMemberCreate,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_current_user),
+) -> WorkspaceMemberRead:
+    get_authorized_workspace(db, workspace_id, current_user, required_role="owner")
+    user = db.scalar(select(AppUser).where(AppUser.email == payload.email.strip().lower()))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Local user with this email was not found.")
+    role = payload.role if payload.role in ROLE_RANK else "viewer"
+    membership = db.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.user_id == user.id,
+        )
+    )
+    if membership is None:
+        membership = WorkspaceMembership(workspace_id=workspace_id, user_id=user.id, role=role)
+        audit_action = "workspace_member_added"
+    else:
+        membership.role = role
+        audit_action = "workspace_member_role_changed"
+    if user.default_workspace_id is None:
+        user.default_workspace_id = workspace_id
+        db.add(user)
+    db.add(membership)
+    audit_event(db, action=audit_action, event_type="workspace", user_id=current_user.id, resource_type="workspace_member", resource_id=str(user.id), metadata={"workspace_id": workspace_id, "member_email": user.email, "role": role})
+    db.commit()
+    db.refresh(membership)
+    return workspace_member_payload(membership)
+
+
+@router.delete("/workspaces/{workspace_id}/members/{membership_id}", tags=["workspaces"])
+def delete_workspace_member_route(
+    workspace_id: int,
+    membership_id: int,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_current_user),
+) -> dict:
+    get_authorized_workspace(db, workspace_id, current_user, required_role="owner")
+    membership = db.get(WorkspaceMembership, membership_id)
+    if membership is None or membership.workspace_id != workspace_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace member not found.")
+    if membership.user_id == current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workspace owners cannot remove their own membership.")
+    owner_count = db.scalar(
+        select(func.count(WorkspaceMembership.id)).where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.role == "owner",
+        )
+    ) or 0
+    if membership.role == "owner" and owner_count <= 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A workspace must keep at least one owner.")
+    db.delete(membership)
+    audit_event(db, action="workspace_member_removed", event_type="workspace", user_id=current_user.id, resource_type="workspace_member", resource_id=str(membership.user_id), metadata={"workspace_id": workspace_id})
+    db.commit()
+    return {"deleted": True, "membership_id": membership_id}
+
+
+@router.get("/workspaces/{workspace_id}/audit-logs", tags=["workspaces"])
+def workspace_audit_logs_route(
+    workspace_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_current_user),
+) -> list[dict]:
+    get_authorized_workspace(db, workspace_id, current_user, required_role="viewer")
+    records = list(
+        db.scalars(
+            select(AuditLog)
+            .where(AuditLog.resource_type.in_(["workspace", "workspace_member"]))
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .limit(limit * 4)
+        )
+    )
+    records = [
+        record for record in records
+        if record.resource_id == str(workspace_id) or str(record.metadata_json.get("workspace_id")) == str(workspace_id)
+    ][:limit]
+    return [
+        {
+            "id": record.id,
+            "actor_user_id": record.user_id,
+            "target_type": record.resource_type,
+            "target_id": record.resource_id,
+            "workspace_id": workspace_id,
+            "action": record.action,
+            "metadata": record.metadata_json,
+            "created_at": record.created_at,
+        }
+        for record in records
+    ]
+
+
+@router.get("/admin/users", response_model=list[AppUserRead], tags=["admin"])
+def admin_list_users_route(
+    search: str | None = Query(default=None, max_length=255),
+    db: Session = Depends(get_db),
+    _: AppUser = Depends(require_admin_user),
+) -> list[AppUserRead]:
+    statement = select(AppUser).order_by(AppUser.created_at.desc(), AppUser.id.desc())
+    if search:
+        like = f"%{search.strip().lower()}%"
+        statement = statement.where(func.lower(AppUser.email).like(like) | func.lower(AppUser.display_name).like(like))
+    return [AppUserRead.model_validate(user) for user in db.scalars(statement)]
+
+
+@router.patch("/admin/users/{user_id}", response_model=AppUserRead, tags=["admin"])
+def admin_update_user_route(
+    user_id: int,
+    payload: AdminUserUpdate,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(require_admin_user),
+) -> AppUserRead:
+    user = db.get(AppUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    changes: dict[str, object] = {}
+    if payload.role is not None:
+        if payload.role not in {"admin", "user"}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Role must be admin or user.")
+        if user.id == current_user.id and user.role == "admin" and payload.role != "admin":
+            admin_count = db.scalar(select(func.count(AppUser.id)).where(AppUser.role == "admin", AppUser.is_active.is_(True))) or 0
+            if admin_count <= 1:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one active admin is required.")
+        if user.role != payload.role:
+            changes["role"] = {"from": user.role, "to": payload.role}
+            user.role = payload.role
+    if payload.is_active is not None and user.is_active != payload.is_active:
+        if user.id == current_user.id and not payload.is_active:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admins cannot deactivate their own active session.")
+        changes["is_active"] = {"from": user.is_active, "to": payload.is_active}
+        user.is_active = payload.is_active
+    if payload.default_workspace_id is not None:
+        workspace = db.get(Workspace, payload.default_workspace_id)
+        if workspace is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Default workspace not found.")
+        membership = db.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == workspace.id,
+                WorkspaceMembership.user_id == user.id,
+            )
+        )
+        if membership is None:
+            db.add(WorkspaceMembership(workspace_id=workspace.id, user_id=user.id, role="viewer"))
+        if user.default_workspace_id != workspace.id:
+            changes["default_workspace_id"] = {"from": user.default_workspace_id, "to": workspace.id}
+            user.default_workspace_id = workspace.id
+    db.add(user)
+    if changes:
+        audit_event(
+            db,
+            action="admin_user_updated",
+            event_type="admin",
+            user_id=current_user.id,
+            resource_type="user",
+            resource_id=str(user.id),
+            metadata=changes,
+        )
+    db.commit()
+    db.refresh(user)
+    return AppUserRead.model_validate(user)
+
+
 @router.get("/admin/usage", tags=["admin"])
 def usage_dashboard_route(db: Session = Depends(get_db), _: AppUser = Depends(require_admin_user)) -> dict:
     return get_usage_dashboard(db)
@@ -809,13 +1193,25 @@ def create_workflow_route(
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
     validated_graph = validate_graph(payload.graph)
+    if payload.workspace_id is not None:
+        current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+        if current_user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login is required to select a workspace.")
+        workspace = get_authorized_workspace(db, payload.workspace_id, current_user, required_role="editor")
+    else:
+        workspace = default_workspace_for_user(db, current_user_id)
+    if workspace is not None:
+        ensure_workspace_can_create_workflow(db, workspace)
     workflow = create_workflow(
         db,
         name=payload.name,
         description=payload.description,
         validated_graph=validated_graph,
         user_id=current_user_id,
+        workspace_id=workspace.id if workspace is not None else None,
     )
+    audit_event(db, action="workflow_created", workflow_id=workflow.id, user_id=current_user_id, resource_type="workflow", resource_id=str(workflow.id), metadata={"workspace_id": workspace.id if workspace else None})
+    db.commit()
     return WorkflowRead.model_validate(workflow)
 
 
@@ -828,6 +1224,7 @@ def list_workflows_route(
     workflows = list_workflows(db, include_archived=include_archived)
     current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
     if current_user is not None and current_user.role != "admin":
+        member_workspace_ids = get_user_workspace_ids(db, current_user.id)
         permitted_workflow_ids = {
             row[0]
             for row in db.execute(
@@ -837,11 +1234,12 @@ def list_workflows_route(
         workflows = [
             workflow
             for workflow in workflows
-            if workflow.created_by_user_id in {None, current_user_id}
+            if workflow.created_by_user_id == current_user_id
             or workflow.updated_by_user_id == current_user_id
+            or (workflow.workspace_id is not None and workflow.workspace_id in member_workspace_ids)
             or workflow.id in permitted_workflow_ids
         ]
-    return [workflow_summary_payload(db, workflow) for workflow in workflows]
+    return [workflow_summary_payload(db, workflow, current_user_id) for workflow in workflows]
 
 
 @router.post("/workflows/import-bundle", response_model=WorkflowRead, status_code=status.HTTP_201_CREATED, tags=["workflows"])
@@ -855,13 +1253,26 @@ def import_workflow_bundle_route(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bundle is missing graph_json.")
     graph = {**graph, "name": f"{graph.get('name', 'Imported Workflow')} Imported"}
     validated_graph = validate_graph(BuilderGraphPayload.model_validate(graph))
+    requested_workspace_id = payload.get("workspace_id")
+    if isinstance(requested_workspace_id, int):
+        current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+        if current_user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login is required to select a workspace.")
+        workspace = get_authorized_workspace(db, requested_workspace_id, current_user, required_role="editor")
+    else:
+        workspace = default_workspace_for_user(db, current_user_id)
+    if workspace is not None:
+        ensure_workspace_can_create_workflow(db, workspace)
     workflow = create_workflow(
         db,
         name=validated_graph.name,
         description="Imported from AI Studio project bundle.",
         validated_graph=validated_graph,
         user_id=current_user_id,
+        workspace_id=workspace.id if workspace is not None else None,
     )
+    audit_event(db, action="workflow_imported", workflow_id=workflow.id, user_id=current_user_id, resource_type="workflow", resource_id=str(workflow.id), metadata={"workspace_id": workspace.id if workspace else None})
+    db.commit()
     return WorkflowRead.model_validate(workflow)
 
 
@@ -874,12 +1285,23 @@ def autobuild_workflow_route(
     prompt = str(payload.get("prompt", "Build a document RAG chatbot"))
     name = str(payload.get("name") or f"Auto-built: {prompt[:60]}").strip()
     graph_json = build_autobuild_graph(name=name, prompt=prompt)
+    requested_workspace_id = payload.get("workspace_id")
+    if isinstance(requested_workspace_id, int):
+        current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+        if current_user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login is required to select a workspace.")
+        workspace = get_authorized_workspace(db, requested_workspace_id, current_user, required_role="editor")
+    else:
+        workspace = default_workspace_for_user(db, current_user_id)
+    if workspace is not None:
+        ensure_workspace_can_create_workflow(db, workspace)
     workflow = create_workflow(
         db,
         name=name,
         description="Auto-built workflow generated from a natural language prompt.",
         validated_graph=validate_graph(BuilderGraphPayload.model_validate(graph_json)),
         user_id=current_user_id,
+        workspace_id=workspace.id if workspace is not None else None,
     )
     audit_event(db, action="autobuild_workflow", workflow_id=workflow.id, user_id=current_user_id, metadata={"prompt": prompt})
     db.commit()
@@ -1017,28 +1439,48 @@ def delete_workflow_route(
 
 
 @router.get("/workflow-templates", response_model=list[WorkflowSummary], tags=["workflows"])
-def list_workflow_templates_route(db: Session = Depends(get_db)) -> list[dict]:
+def list_workflow_templates_route(
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
     workflows = list(
         db.scalars(
             select(Workflow)
-            .where(Workflow.description == "Advanced seeded workflow for local testing.")
+            .where((Workflow.is_template.is_(True)) | (Workflow.description == "Advanced seeded workflow for local testing."))
             .order_by(Workflow.name)
         )
     )
-    return [workflow_summary_payload(db, workflow) for workflow in workflows]
+    return [workflow_summary_payload(db, workflow, current_user_id) for workflow in workflows]
 
 
 @router.post("/workflow-templates/{workflow_id}/create", response_model=WorkflowRead, status_code=status.HTTP_201_CREATED, tags=["workflows"])
 def create_from_template_route(
     workflow_id: int,
+    payload: dict | None = None,
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = duplicate_workflow(db, get_workflow_or_404(db, workflow_id), user_id=current_user_id)
+    requested_workspace_id = (payload or {}).get("workspace_id")
+    if isinstance(requested_workspace_id, int):
+        current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+        if current_user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login is required to select a workspace.")
+        workspace = get_authorized_workspace(db, requested_workspace_id, current_user, required_role="editor")
+    else:
+        workspace = default_workspace_for_user(db, current_user_id)
+    if workspace is not None:
+        ensure_workspace_can_create_workflow(db, workspace)
+    workflow = duplicate_workflow(
+        db,
+        get_workflow_or_404(db, workflow_id),
+        user_id=current_user_id,
+        workspace_id=workspace.id if workspace is not None else None,
+    )
     workflow.name = workflow.name.replace(" Copy", " Workspace")
     workflow.description = "Workspace created from an advanced template."
     workflow.graph_json = {**workflow.graph_json, "name": workflow.name}
     db.add(workflow)
+    audit_event(db, action="workflow_cloned_from_template", workflow_id=workflow.id, user_id=current_user_id, resource_type="workflow", resource_id=str(workflow.id), metadata={"template_id": workflow_id, "workspace_id": workspace.id if workspace else None})
     db.commit()
     return WorkflowRead.model_validate(get_workflow_or_404(db, workflow.id))
 
@@ -1549,7 +1991,9 @@ def execute_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRunRead:
-    get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    if workflow.workspace is not None:
+        ensure_workspace_can_run(db, workflow.workspace)
     workflow_run = execute_workflow(db, workflow_id, payload, owner_user_id=current_user_id)
     audit_event(
         db,
@@ -1570,7 +2014,9 @@ def execute_workflow_async_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> dict:
-    get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="runner")
+    if workflow.workspace is not None:
+        ensure_workspace_can_run(db, workflow.workspace)
     queued = enqueue_workflow_execution(workflow_id, payload, owner_user_id=current_user_id)
     audit_event(
         db,
@@ -2035,12 +2481,18 @@ def publish_workflow_route(
     workflow_id: int,
     payload: PublishWorkflowRequest,
     db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
 ) -> PublishWorkflowResponse:
-    workflow = publish_workflow(db, workflow_id, payload.slug)
+    get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
+    workflow, access_token = publish_workflow(db, workflow_id, payload.slug, visibility=payload.visibility)
+    audit_event(db, action="workflow_publish_visibility_changed", workflow_id=workflow_id, user_id=current_user_id, metadata={"visibility": workflow.published_visibility})
+    db.commit()
     return PublishWorkflowResponse(
         workflow_id=workflow.id,
         slug=workflow.published_slug or "",
         is_published=workflow.is_published,
+        visibility=workflow.published_visibility,
+        access_token=access_token,
         chat_endpoint=f"/published/chatbots/{workflow.published_slug}/messages",
     )
 
@@ -2051,18 +2503,48 @@ def unpublish_workflow_route(
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> WorkflowRead:
-    workflow = get_workflow_or_404(db, workflow_id)
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
     workflow.is_published = False
     workflow.published_slug = None
     workflow.published_version_id = None
+    workflow.publish_token_hash = None
     workflow.updated_by_user_id = current_user_id
     db.add(workflow)
+    audit_event(db, action="workflow_unpublished", workflow_id=workflow_id, user_id=current_user_id)
     db.commit()
     return WorkflowRead.model_validate(get_workflow_or_404(db, workflow_id))
 
 
+@router.post("/workflows/{workflow_id}/publish/token", response_model=PublishWorkflowResponse, tags=["publish"])
+def regenerate_publish_token_route(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> PublishWorkflowResponse:
+    workflow = get_authorized_workflow(db, workflow_id, current_user_id, required_role="owner")
+    if not workflow.is_published or not workflow.published_slug:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workflow must be published before generating a token.")
+    token = generate_publish_token()
+    workflow.published_visibility = "token_protected"
+    workflow.publish_token_hash = hash_publish_token(token)
+    db.add(workflow)
+    audit_event(db, action="workflow_publish_token_regenerated", workflow_id=workflow_id, user_id=current_user_id)
+    db.commit()
+    return PublishWorkflowResponse(
+        workflow_id=workflow.id,
+        slug=workflow.published_slug or "",
+        is_published=workflow.is_published,
+        visibility=workflow.published_visibility,
+        access_token=token,
+        chat_endpoint=f"/published/chatbots/{workflow.published_slug}/messages",
+    )
+
+
 @router.get("/published/chatbots", response_model=list[WorkflowSummary], tags=["publish"])
-def list_published_chatbots_route(db: Session = Depends(get_db)) -> list[dict]:
+def list_published_chatbots_route(
+    db: Session = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+) -> list[dict]:
     workflows = list(
         db.scalars(
             select(Workflow)
@@ -2074,7 +2556,20 @@ def list_published_chatbots_route(db: Session = Depends(get_db)) -> list[dict]:
             .order_by(Workflow.updated_at.desc())
         )
     )
-    return [workflow_summary_payload(db, workflow) for workflow in workflows]
+    current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+    if current_user is None:
+        workflows = [workflow for workflow in workflows if workflow.published_visibility == "public"]
+    elif current_user.role != "admin":
+        workspace_ids = get_user_workspace_ids(db, current_user.id)
+        workflows = [
+            workflow
+            for workflow in workflows
+            if workflow.published_visibility == "public"
+            or workflow.created_by_user_id == current_user.id
+            or workflow.updated_by_user_id == current_user.id
+            or (workflow.workspace_id is not None and workflow.workspace_id in workspace_ids)
+        ]
+    return [workflow_summary_payload(db, workflow, current_user_id) for workflow in workflows]
 
 
 @router.get(
@@ -2088,6 +2583,7 @@ def get_published_chatbot_route(slug: str, db: Session = Depends(get_db)) -> Pub
         workflow_id=workflow.id,
         slug=workflow.published_slug or "",
         is_published=workflow.is_published,
+        visibility=workflow.published_visibility,
         chat_endpoint=f"/published/chatbots/{workflow.published_slug}/messages",
     )
 
@@ -2103,7 +2599,10 @@ def published_chat_message_route(
     payload: PublishedChatRequest,
     db: Session = Depends(get_db),
     current_user_id: int | None = Depends(get_current_user_id),
+    x_publish_token: str | None = Header(default=None),
 ) -> PublishedChatResponse:
+    workflow_for_access = get_published_workflow_or_404(db, slug)
+    validate_published_access(db, workflow_for_access, user_id=current_user_id, token=x_publish_token or str(payload.metadata.get("publish_token", "") or ""))
     workflow, workflow_run = execute_published_chat_message(db, slug=slug, payload=payload, owner_user_id=current_user_id)
     response_payload = extract_chatbot_response_from_run(workflow_run)
     return PublishedChatResponse(

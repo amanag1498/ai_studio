@@ -55,7 +55,7 @@ class WorkflowBase(BaseModel):
 
 
 class WorkflowCreate(WorkflowBase):
-    pass
+    workspace_id: int | None = None
 
 
 class WorkflowUpdate(WorkflowBase):
@@ -99,6 +99,13 @@ class WorkflowSummary(BaseModel):
     latest_saved_version: int
     is_published: bool
     published_slug: str | None
+    published_visibility: str = "public"
+    is_template: bool = False
+    template_scope: str | None = None
+    workspace_id: int | None = None
+    workspace_name: str | None = None
+    effective_role: str | None = None
+    effective_role_source: str | None = None
     created_by_user_id: int | None = None
     updated_by_user_id: int | None = None
     archived_at: datetime | None = None

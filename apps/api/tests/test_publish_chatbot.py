@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from app.models.workflow import Workflow
-from app.services.publish import extract_chatbot_response_from_run, publish_workflow, slugify
+import pytest
+from fastapi import HTTPException
+
+from app.models.workflow import Workflow, WorkspaceMembership
+from app.services.auth import create_local_user
+from app.services.publish import extract_chatbot_response_from_run, publish_workflow, slugify, validate_published_access
+from app.services.workspaces import ensure_user_workspace
 
 
 class FakeRun:
@@ -40,10 +45,39 @@ def test_slugify_normalizes_names():
 def test_publish_workflow_sets_slug_and_flag(db_session):
     workflow = create_workflow(db_session)
 
-    published = publish_workflow(db_session, workflow.id, None)
+    published, access_token = publish_workflow(db_session, workflow.id, None)
 
     assert published.is_published is True
     assert published.published_slug == "support-bot"
+    assert access_token is None
+
+
+def test_token_protected_publish_requires_matching_token(db_session):
+    workflow = create_workflow(db_session)
+    published, access_token = publish_workflow(db_session, workflow.id, None, visibility="token_protected")
+
+    assert access_token
+    validate_published_access(db_session, published, token=access_token)
+    with pytest.raises(HTTPException) as exc:
+        validate_published_access(db_session, published, token="wrong")
+
+    assert exc.value.status_code == 401
+
+
+def test_workspace_only_publish_allows_workspace_member(db_session):
+    owner = create_local_user(db_session, email="owner2@example.com", display_name="Owner Two", password="secret123")
+    member = create_local_user(db_session, email="member2@example.com", display_name="Member Two", password="secret123")
+    workspace = ensure_user_workspace(db_session, owner)
+    db_session.add(WorkspaceMembership(workspace_id=workspace.id, user_id=member.id, role="runner"))
+    workflow = create_workflow(db_session, name="Workspace Bot")
+    workflow.workspace_id = workspace.id
+    workflow.created_by_user_id = owner.id
+    db_session.add(workflow)
+    db_session.commit()
+
+    published, _ = publish_workflow(db_session, workflow.id, None, visibility="workspace_only")
+
+    validate_published_access(db_session, published, user_id=member.id)
 
 
 def test_extract_chatbot_response_from_run_returns_chat_output_payload():

@@ -8,6 +8,7 @@ import {
   FileStack,
   FolderOpen,
   Layers3,
+  Settings2,
   Rocket,
   ShieldCheck,
   Sparkles,
@@ -21,7 +22,10 @@ import {
   archiveWorkflow,
   autoBuildWorkflow,
   compareWorkflowVersion,
+  addWorkspaceMember,
+  createWorkspace,
   createWorkflowFromTemplate,
+  deleteWorkspaceMember,
   createWorkflowComment,
   createWorkflowSubflow,
   deleteWorkflow,
@@ -39,6 +43,7 @@ import {
   listBlockMarketplace,
   listFiles,
   listPublishedChatbots,
+  listAdminUsers,
   listSubflows,
   listWorkflowComments,
   listWorkflowHistory,
@@ -46,12 +51,17 @@ import {
   listWorkflowRuns,
   listWorkflowTemplates,
   listWorkflows,
+  listWorkspaces,
+  listWorkspaceAuditLogs,
   publishWorkflow,
+  regeneratePublishToken,
   restoreWorkflow,
   restoreWorkflowVersion,
+  setDefaultWorkspace,
   testKnowledgeRetrieval,
   unpublishWorkflow,
   updateWorkflowMetadata,
+  updateAdminUser,
   uploadLibraryFile,
   type AppUser,
   type AuditLogRecord,
@@ -69,6 +79,8 @@ import {
   type WorkflowComment,
   type FileLibraryItem,
   type WorkflowSubflow,
+  type WorkspaceRecord,
+  type WorkspaceAuditLogRecord,
 } from "../lib/api";
 import type { BuilderGraph } from "@vmb/shared";
 
@@ -82,7 +94,7 @@ type WorkflowsPageProps = {
   onOpenFiles: () => void;
 };
 
-type HomeView = "workflows" | "create" | "templates" | "usage" | "runs" | "publish" | "files" | "knowledge" | "components" | "marketplace" | "health" | "bundle" | "account";
+type HomeView = "workflows" | "create" | "templates" | "usage" | "runs" | "publish" | "files" | "knowledge" | "components" | "marketplace" | "health" | "bundle" | "workspaces" | "adminUsers" | "account";
 type WorkflowLaunchKind = "pure_chat" | "rag_chat" | "file_rag_app" | "document_app" | "builder_app";
 type WorkflowAppProfile = {
   kind: WorkflowLaunchKind;
@@ -107,6 +119,7 @@ type NavIconName =
   | "blocks"
   | "shield"
   | "bundle"
+  | "workspace"
   | "user";
 
 function NavIcon({ name, className = "h-4 w-4" }: { name: NavIconName; className?: string }) {
@@ -123,6 +136,7 @@ function NavIcon({ name, className = "h-4 w-4" }: { name: NavIconName; className
     blocks: Blocks,
     shield: ShieldCheck,
     bundle: FileStack,
+    workspace: Settings2,
     user: UserRound,
   };
   const Icon = icons[name];
@@ -138,6 +152,21 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
   const [observability, setObservability] = useState<ObservabilityDashboard | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(authenticatedUser);
+  const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem("ai-studio-active-workspace-id");
+      return saved ? Number(saved) || null : null;
+    } catch {
+      return null;
+    }
+  });
+  const [workspaceAuditLogs, setWorkspaceAuditLogs] = useState<WorkspaceAuditLogRecord[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AppUser[]>([]);
+  const [adminUserSearch, setAdminUserSearch] = useState("");
+  const [workspaceForm, setWorkspaceForm] = useState({ name: "", description: "", workflow_limit: 100, monthly_run_limit: 1000, storage_limit_mb: 2048 });
+  const [workspaceMemberForm, setWorkspaceMemberForm] = useState({ workspace_id: 0, email: "", role: "viewer" });
+  const [publishVisibility, setPublishVisibility] = useState<Record<number, string>>({});
   const [templates, setTemplates] = useState<WorkflowSummary[]>([]);
   const [publishedChatbots, setPublishedChatbots] = useState<WorkflowSummary[]>([]);
   const [selectedWorkflowDetails, setSelectedWorkflowDetails] = useState<WorkflowRecord | null>(null);
@@ -174,6 +203,26 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
   }, [authenticatedUser]);
 
   const isAdmin = currentUser?.role === "admin";
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) || workspaces[0] || null;
+
+  function selectActiveWorkspace(workspaceId: number | null) {
+    setActiveWorkspaceId(workspaceId);
+    try {
+      if (workspaceId) {
+        localStorage.setItem("ai-studio-active-workspace-id", String(workspaceId));
+      } else {
+        localStorage.removeItem("ai-studio-active-workspace-id");
+      }
+    } catch {
+      // Local storage is an enhancement; the backend still receives explicit workspace IDs from the UI.
+    }
+  }
+
+  function canCreateInWorkspace(workspace: WorkspaceRecord | null) {
+    if (!currentUser || !workspace) return false;
+    if (isAdmin) return true;
+    return ["owner", "editor"].includes(workspace.current_user_role || "");
+  }
 
   useEffect(() => {
     void refreshWorkflows();
@@ -184,8 +233,31 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
   }, [showArchived]);
 
   useEffect(() => {
-    if (!isAdmin && ["usage", "health", "bundle"].includes(activeView)) {
+    if (!isAdmin && ["usage", "health", "bundle", "adminUsers"].includes(activeView)) {
       setActiveView("workflows");
+    }
+  }, [activeView, isAdmin]);
+
+  useEffect(() => {
+    if (!workspaces.length) return;
+    const selectedExists = activeWorkspaceId ? workspaces.some((workspace) => workspace.id === activeWorkspaceId) : false;
+    if (!selectedExists) {
+      const defaultWorkspace = workspaces.find((workspace) => workspace.id === currentUser?.default_workspace_id) || workspaces[0];
+      selectActiveWorkspace(defaultWorkspace.id);
+    }
+  }, [activeWorkspaceId, currentUser?.default_workspace_id, workspaces]);
+
+  useEffect(() => {
+    if (!activeWorkspaceId || !currentUser) {
+      setWorkspaceAuditLogs([]);
+      return;
+    }
+    void refreshWorkspaceAudit(activeWorkspaceId);
+  }, [activeWorkspaceId, currentUser]);
+
+  useEffect(() => {
+    if (activeView === "adminUsers" && isAdmin) {
+      void refreshAdminUsers();
     }
   }, [activeView, isAdmin]);
 
@@ -288,18 +360,46 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
   }
 
   async function refreshProductSurfaces() {
-    const [health, knowledge, blocks, files, savedSubflows] = await Promise.allSettled([
+    const [health, knowledge, blocks, files, savedSubflows, workspaceList] = await Promise.allSettled([
       getSystemHealthDetails(),
       listAllKnowledgeCollections(),
       listBlockMarketplace(),
       listFiles(),
       listSubflows(),
+      listWorkspaces(),
     ]);
     if (health.status === "fulfilled") setSystemHealth(health.value);
     if (knowledge.status === "fulfilled") setGlobalKnowledge(knowledge.value);
     if (blocks.status === "fulfilled") setMarketplaceBlocks(blocks.value);
     if (files.status === "fulfilled") setFileLibrary(files.value);
     if (savedSubflows.status === "fulfilled") setAllSubflows(savedSubflows.value);
+    if (workspaceList.status === "fulfilled") {
+      setWorkspaces(workspaceList.value);
+      if (!workspaceMemberForm.workspace_id && workspaceList.value[0]) {
+        setWorkspaceMemberForm((current) => ({ ...current, workspace_id: workspaceList.value[0].id }));
+      }
+    }
+  }
+
+  async function refreshWorkspaceAudit(workspaceId = activeWorkspaceId) {
+    if (!workspaceId) return;
+    try {
+      setWorkspaceAuditLogs(await listWorkspaceAuditLogs(workspaceId, 60));
+    } catch {
+      setWorkspaceAuditLogs([]);
+    }
+  }
+
+  async function refreshAdminUsers(search = adminUserSearch) {
+    if (!isAdmin) {
+      setAdminUsers([]);
+      return;
+    }
+    try {
+      setAdminUsers(await listAdminUsers(search));
+    } catch {
+      setAdminUsers([]);
+    }
   }
 
   async function refreshRunHistory(sourceWorkflows = workflows) {
@@ -352,7 +452,10 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
         onOpenWorkflowApp(workflowId);
         return;
       }
-      const published = await publishWorkflow(workflowId);
+      const published = await publishWorkflow(workflowId, publishVisibility[workflowId] || "public");
+      if (published.access_token) {
+        void copyText(`${getChatUrl(published.slug)}?token=${published.access_token}`);
+      }
       await refreshAll();
       onOpenChat(published.slug);
     } catch (error) {
@@ -366,6 +469,13 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
       setStatusMessage("Login locally before creating workflows so ownership is tracked.");
       return;
     }
+    if (!canCreateInWorkspace(activeWorkspace)) {
+      setStatusMessage("Choose a workspace where you are an owner or editor before creating a workflow.");
+      return;
+    }
+    if (activeWorkspace) {
+      selectActiveWorkspace(activeWorkspace.id);
+    }
     onCreateWorkflow();
   }
 
@@ -375,7 +485,11 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
       return;
     }
     try {
-      const workflow = await createWorkflowFromTemplate(workflowId);
+      if (!canCreateInWorkspace(activeWorkspace)) {
+        setStatusMessage("Choose a workspace where you can create workflows before cloning this template.");
+        return;
+      }
+      const workflow = await createWorkflowFromTemplate(workflowId, activeWorkspace?.id || undefined);
       setStatusMessage(`Created ${workflow.name} from template.`);
       await refreshAll();
       onOpenWorkflow(workflow.id);
@@ -391,7 +505,11 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
     }
     try {
       setStatusMessage(`Building ${recipe.name}.`);
-      const workflow = await autoBuildWorkflow({ name: recipe.name, prompt: recipe.prompt });
+      if (!canCreateInWorkspace(activeWorkspace)) {
+        setStatusMessage("Choose a workspace where you can create workflows before using guided creation.");
+        return;
+      }
+      const workflow = await autoBuildWorkflow({ name: recipe.name, prompt: recipe.prompt, workspace_id: activeWorkspace?.id || undefined });
       await refreshAll();
       onOpenWorkflow(workflow.id);
     } catch (error) {
@@ -549,14 +667,30 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
 
   async function importBundle() {
     try {
+      if (!canCreateInWorkspace(activeWorkspace)) {
+        setStatusMessage("Choose a workspace where you can import workflows first.");
+        return;
+      }
       const bundle = JSON.parse(bundleImportText) as Record<string, unknown>;
-      const workflow = await importWorkflowBundle(bundle);
+      const workflow = await importWorkflowBundle(bundle, activeWorkspace?.id || undefined);
       setBundleImportText("");
       setStatusMessage(`Imported ${workflow.name}.`);
       await refreshAll();
       onOpenWorkflow(workflow.id);
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Could not import workflow bundle JSON.");
+    }
+  }
+
+  async function regenerateToken(workflowId: number) {
+    try {
+      const response = await regeneratePublishToken(workflowId);
+      const link = `${getChatUrl(response.slug)}?token=${response.access_token || ""}`;
+      await copyText(link);
+      setStatusMessage("Token-protected link regenerated and copied.");
+      await refreshAll();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not regenerate publish token.");
     }
   }
 
@@ -623,6 +757,29 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
     onOpenWorkflowApp(workflow.id);
   }
 
+  function quotaClass(used: number, limit: number) {
+    const ratio = limit > 0 ? used / limit : 0;
+    if (ratio >= 1) return "bg-coral/20 text-ink ring-coral/30";
+    if (ratio >= 0.9) return "bg-sand text-ink ring-sand";
+    if (ratio >= 0.8) return "bg-lime/25 text-ink ring-lime/30";
+    return "bg-white text-ink/62 ring-ink/6";
+  }
+
+  function workflowCanEdit(workflow: WorkflowSummary) {
+    const role = (workflow.effective_role || "").toLowerCase();
+    return isAdmin || role.includes("owner") || role.includes("editor") || role.includes("admin");
+  }
+
+  async function updateUserAsAdmin(user: AppUser, updates: { role?: "admin" | "user"; is_active?: boolean; default_workspace_id?: number }) {
+    try {
+      await updateAdminUser(user.id, updates);
+      setStatusMessage(`Updated ${user.display_name}.`);
+      await Promise.all([refreshAdminUsers(), refreshProductSurfaces()]);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not update user.");
+    }
+  }
+
   const navItems: Array<{ id: HomeView; label: string; short: string; detail: string; group: string; tone: string; icon: NavIconName }> = [
     { id: "workflows", label: "Workflows", short: "WF", detail: `${workflows.length} saved`, group: "Operate", tone: "from-lime/90 to-lime/45", icon: "workflow" },
     { id: "create", label: "Create", short: "CR", detail: "wizard", group: "Operate", tone: "from-sand to-lime/50", icon: "spark" },
@@ -635,11 +792,13 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
     { id: "components", label: "Components", short: "CP", detail: `${allSubflows.length} saved`, group: "Build", tone: "from-white/80 to-mist", icon: "component" },
     { id: "marketplace", label: "Blocks", short: "BX", detail: `${marketplaceBlocks.length} blocks`, group: "Build", tone: "from-lime/60 to-sand", icon: "blocks" },
     { id: "bundle", label: "Bundles", short: "BD", detail: "import/export", group: "Build", tone: "from-sand to-coral/30", icon: "bundle" },
+    { id: "workspaces", label: "Workspaces", short: "WS", detail: activeWorkspace?.name || `${workspaces.length} teams`, group: "System", tone: "from-lime/60 to-white/80", icon: "workspace" },
+    { id: "adminUsers", label: "Users", short: "UR", detail: `${adminUsers.length || usage?.totals.users || 0} users`, group: "System", tone: "from-mist to-lime/40", icon: "user" },
     { id: "health", label: "Health", short: "HL", detail: systemHealth ? "checked" : "setup", group: "System", tone: "from-mist to-white/80", icon: "shield" },
     { id: "account", label: "Account", short: "AC", detail: currentUser ? currentUser.role : "login", group: "System", tone: "from-white/80 to-lime/50", icon: "user" },
   ];
   const navGroups = ["Operate", "Observe", "Ship", "Data", "Build", "System"];
-  const adminOnlyViews = new Set<HomeView>(["usage", "health", "bundle"]);
+  const adminOnlyViews = new Set<HomeView>(["usage", "health", "bundle", "adminUsers"]);
   const visibleNavItems = navItems.filter((item) => isAdmin || !adminOnlyViews.has(item.id));
   const visibleNavGroups = navGroups.filter((group) => visibleNavItems.some((item) => item.group === group));
   const activeNavItem = visibleNavItems.find((item) => item.id === activeView) || visibleNavItems[0] || navItems[0];
@@ -656,6 +815,8 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
     marketplace: "Browse block capabilities",
     health: "Check studio readiness",
     bundle: "Move workflows safely",
+    workspaces: "Manage teams and workspace access",
+    adminUsers: "Manage local studio users",
     account: "Control identity and ownership",
   };
   const activeSubtitle: Record<HomeView, string> = {
@@ -671,6 +832,8 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
     marketplace: "See implemented and upcoming blocks, their ports, config fields, and extension phase.",
     health: "Validate SQLite, local storage, Chroma, OpenRouter, embedding, and environment configuration.",
     bundle: "Export project bundles or import a workflow JSON bundle into a fresh editable workspace.",
+    workspaces: "Switch workspace context, review members, quotas, workflows, and workspace-level audit activity.",
+    adminUsers: "Admin-only user management for roles, activation state, and default workspace assignment.",
     account: "Use local-first login so created workflows, runs, and publish actions have clear ownership.",
   };
   const guidedRecipes = [
@@ -730,6 +893,64 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
   function logoutLocalUser() {
     onLogout();
     setStatusMessage("Logged out locally.");
+  }
+
+  async function submitWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!workspaceForm.name.trim()) return;
+    try {
+      const workspace = await createWorkspace({
+        name: workspaceForm.name.trim(),
+        description: workspaceForm.description.trim() || undefined,
+        workflow_limit: workspaceForm.workflow_limit,
+        monthly_run_limit: workspaceForm.monthly_run_limit,
+        storage_limit_mb: workspaceForm.storage_limit_mb,
+      });
+      setWorkspaceForm({ name: "", description: "", workflow_limit: 100, monthly_run_limit: 1000, storage_limit_mb: 2048 });
+      setWorkspaceMemberForm((current) => ({ ...current, workspace_id: workspace.id }));
+      await refreshProductSurfaces();
+      setStatusMessage(`Workspace "${workspace.name}" created.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not create workspace.");
+    }
+  }
+
+  async function submitWorkspaceMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!workspaceMemberForm.workspace_id || !workspaceMemberForm.email.trim()) return;
+    try {
+      await addWorkspaceMember(workspaceMemberForm.workspace_id, {
+        email: workspaceMemberForm.email.trim(),
+        role: workspaceMemberForm.role,
+      });
+      setWorkspaceMemberForm((current) => ({ ...current, email: "" }));
+      await refreshProductSurfaces();
+      setStatusMessage("Workspace member saved.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not save workspace member.");
+    }
+  }
+
+  async function makeDefaultWorkspace(workspaceId: number) {
+    try {
+      const user = await setDefaultWorkspace(workspaceId);
+      localStorage.setItem("vmb-local-user", JSON.stringify(user));
+      setCurrentUser(user);
+      await refreshProductSurfaces();
+      setStatusMessage("Default workspace updated.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not set default workspace.");
+    }
+  }
+
+  async function removeWorkspaceMember(workspaceId: number, membershipId: number) {
+    try {
+      await deleteWorkspaceMember(workspaceId, membershipId);
+      await refreshProductSurfaces();
+      setStatusMessage("Workspace member removed.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not remove workspace member.");
+    }
   }
 
   function startRename(workflow: WorkflowSummary) {
@@ -903,6 +1124,22 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                   <span className="rounded-full border border-lime/20 bg-lime/18 px-3 py-1.5 text-xs font-bold text-lime backdrop-blur">
                     {currentUser ? `Owner: ${currentUser.display_name}` : "Login recommended"}
                   </span>
+                  <label className="flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-xs font-bold text-white/78 backdrop-blur">
+                    <span className="text-white/45">Workspace</span>
+                    <select
+                      value={activeWorkspaceId || ""}
+                      onChange={(event) => selectActiveWorkspace(Number(event.target.value) || null)}
+                      className="max-w-[190px] bg-transparent text-xs font-black text-white outline-none"
+                      title="Current workspace"
+                    >
+                      {!workspaces.length ? <option value="">No workspace</option> : null}
+                      {workspaces.map((workspace) => (
+                        <option key={workspace.id} value={workspace.id} className="text-ink">
+                          {workspace.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
               </div>
               <div className="relative mt-5 flex flex-wrap gap-2 lg:mt-0 lg:justify-end">
@@ -936,16 +1173,34 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
             </header>
 
         {activeView === "create" ? (
-          <section className="mt-6 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+          <section className="mt-6 grid gap-4 xl:grid-cols-[0.8fr_1.2fr_0.9fr]">
             <div className="rounded-[2rem] border border-white/70 bg-ink p-5 text-white shadow-panel">
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/45">Creation Wizard</p>
               <h2 className="mt-2 text-3xl font-bold">Start with intent</h2>
               <p className="mt-3 text-sm leading-6 text-white/62">
                 Choose a blank builder canvas when you are designing from scratch, or clone a template when you want a tested file/RAG/chat pipeline immediately.
               </p>
+              <label className="mt-5 block rounded-[1.35rem] bg-white/10 p-3 text-xs font-bold uppercase tracking-[0.18em] text-white/48 ring-1 ring-white/10">
+                Create inside workspace
+                <select
+                  value={activeWorkspaceId || ""}
+                  onChange={(event) => selectActiveWorkspace(Number(event.target.value) || null)}
+                  className="mt-2 w-full rounded-2xl bg-white px-3 py-3 text-sm font-black normal-case tracking-normal text-ink outline-none"
+                >
+                  {workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.current_user_role || "viewer"}</option>
+                  ))}
+                </select>
+                {!canCreateInWorkspace(activeWorkspace) ? (
+                  <span className="mt-2 block text-[11px] normal-case leading-5 tracking-normal text-coral">
+                    You need owner or editor access in this workspace to create workflows.
+                  </span>
+                ) : null}
+              </label>
               <button
                 type="button"
                 onClick={guardedCreateWorkflow}
+                disabled={!canCreateInWorkspace(activeWorkspace)}
                 className="mt-5 w-full rounded-[1.4rem] bg-lime px-5 py-4 text-left text-sm font-bold text-ink transition hover:brightness-95"
               >
                 Blank AI workflow
@@ -1262,6 +1517,9 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                     <div className="min-w-0">
                       <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink/42">Published Chatbot</p>
                       <p className="truncate text-sm font-semibold">{workflow.name}</p>
+                      <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.18em] text-ink/42">
+                        {workflow.published_visibility || "public"} · {workflow.effective_role || "Access"}
+                      </p>
                       <button
                         type="button"
                         onClick={() => workflow.published_slug && onOpenChat(workflow.published_slug)}
@@ -1328,6 +1586,30 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                       className="rounded-full bg-lime/35 px-3 py-1.5 text-xs font-semibold text-ink"
                     >
                       App Preview
+                    </button>
+                    <select
+                      value={publishVisibility[workflow.id] || workflow.published_visibility || "public"}
+                      onChange={(event) => setPublishVisibility((current) => ({ ...current, [workflow.id]: event.target.value }))}
+                      className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-ink ring-1 ring-ink/10"
+                      title="Publish visibility"
+                    >
+                      <option value="public">Public local link</option>
+                      <option value="workspace_only">Workspace-only</option>
+                      <option value="token_protected">Token protected</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void publishAndOpen(workflow.id)}
+                      className="rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink"
+                    >
+                      Update Visibility
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void regenerateToken(workflow.id)}
+                      className="rounded-full bg-sand/70 px-3 py-1.5 text-xs font-semibold text-ink"
+                    >
+                      Regenerate Token
                     </button>
                   </div>
                 </div>
@@ -1593,6 +1875,96 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                 )) || <p className="rounded-[1.25rem] bg-mist/70 p-4 text-sm text-ink/58">Health details unavailable. Start the API and refresh.</p>}
               </div>
             </div>
+            <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Workspaces</p>
+                  <h2 className="mt-2 text-2xl font-bold">Tenant control</h2>
+                  <p className="mt-1 text-sm text-ink/58">Group workflows, members, and quotas before this grows into teams or SaaS billing.</p>
+                </div>
+                <span className="rounded-full bg-lime/30 px-3 py-1 text-xs font-bold text-ink">{workspaces.length} active</span>
+              </div>
+              <div className="mt-4 grid gap-3">
+                {workspaces.map((workspace) => {
+                  const storageMb = Math.round((workspace.usage.storage_bytes / 1024 / 1024) * 10) / 10;
+                  return (
+                    <article key={workspace.id} className="rounded-[1.4rem] bg-mist/70 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-black text-ink">{workspace.name}</p>
+                          <p className="mt-1 text-xs text-ink/55">
+                            {workspace.slug} · your role: {workspace.current_user_role || "viewer"}
+                            {currentUser?.default_workspace_id === workspace.id ? " · default" : ""}
+                          </p>
+                      </div>
+                        <div className="flex flex-wrap gap-2">
+                          {currentUser?.default_workspace_id !== workspace.id ? (
+                            <button type="button" onClick={() => void makeDefaultWorkspace(workspace.id)} className="rounded-full bg-white px-3 py-1 text-[11px] font-bold text-ink">
+                              Set default
+                            </button>
+                          ) : null}
+                          <span className="rounded-full bg-white px-3 py-1 text-[11px] font-bold text-ink">{workspace.usage.member_count} member(s)</span>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                        <InfoCard title="Workflows" body={`${workspace.usage.workflow_count}/${workspace.workflow_limit}`} />
+                        <InfoCard title="Runs 30d" body={`${workspace.usage.runs_last_30d}/${workspace.monthly_run_limit}`} />
+                        <InfoCard title="Storage" body={`${storageMb}MB/${workspace.storage_limit_mb}MB`} />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {workspace.members.slice(0, 8).map((member) => (
+                          <span key={member.id} className="inline-flex items-center gap-2 rounded-full bg-white/80 px-3 py-1 text-[11px] font-semibold text-ink/68">
+                            {member.display_name} · {member.role}
+                            {isAdmin || workspace.current_user_role === "owner" ? (
+                              <button
+                                type="button"
+                                onClick={() => void removeWorkspaceMember(workspace.id, member.id)}
+                                className="rounded-full bg-ink/8 px-1.5 text-[10px] font-black text-ink/55 hover:bg-coral/20"
+                                aria-label={`Remove ${member.display_name}`}
+                              >
+                                x
+                              </button>
+                            ) : null}
+                          </span>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+                {!workspaces.length ? (
+                  <p className="rounded-[1.4rem] bg-mist/70 p-4 text-sm text-ink/58">No workspace membership found yet.</p>
+                ) : null}
+              </div>
+              {isAdmin ? (
+                <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                  <form onSubmit={submitWorkspace} className="rounded-[1.4rem] bg-ink p-4 text-white">
+                    <p className="text-xs font-black uppercase tracking-[0.22em] text-white/42">Admin</p>
+                    <h3 className="mt-1 font-black">Create workspace</h3>
+                    <input value={workspaceForm.name} onChange={(event) => setWorkspaceForm((current) => ({ ...current, name: event.target.value }))} placeholder="Workspace name" className="mt-3 w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                    <input value={workspaceForm.description} onChange={(event) => setWorkspaceForm((current) => ({ ...current, description: event.target.value }))} placeholder="Description" className="mt-2 w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <input value={workspaceForm.workflow_limit} onChange={(event) => setWorkspaceForm((current) => ({ ...current, workflow_limit: Number(event.target.value) || 1 }))} type="number" min={1} title="Workflow limit" className="w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                      <input value={workspaceForm.monthly_run_limit} onChange={(event) => setWorkspaceForm((current) => ({ ...current, monthly_run_limit: Number(event.target.value) || 1 }))} type="number" min={1} title="Monthly run limit" className="w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                      <input value={workspaceForm.storage_limit_mb} onChange={(event) => setWorkspaceForm((current) => ({ ...current, storage_limit_mb: Number(event.target.value) || 1 }))} type="number" min={1} title="Storage limit MB" className="w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                    </div>
+                    <p className="mt-1 text-[10px] font-semibold text-white/45">workflows · monthly runs · storage MB</p>
+                    <button type="submit" className="mt-3 rounded-full bg-lime px-4 py-2 text-sm font-black text-ink">Create</button>
+                  </form>
+                  <form onSubmit={submitWorkspaceMember} className="rounded-[1.4rem] bg-mist/70 p-4">
+                    <p className="text-xs font-black uppercase tracking-[0.22em] text-ink/42">Members</p>
+                    <h3 className="mt-1 font-black text-ink">Invite local user</h3>
+                    <select value={workspaceMemberForm.workspace_id} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, workspace_id: Number(event.target.value) }))} className="mt-3 w-full rounded-2xl bg-white px-3 py-2 text-sm outline-none">
+                      {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+                    </select>
+                    <input value={workspaceMemberForm.email} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, email: event.target.value }))} placeholder="user@email.com" className="mt-2 w-full rounded-2xl bg-white px-3 py-2 text-sm outline-none" />
+                    <select value={workspaceMemberForm.role} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, role: event.target.value }))} className="mt-2 w-full rounded-2xl bg-white px-3 py-2 text-sm outline-none">
+                      {["member", "runner", "editor", "owner"].map((role) => <option key={role} value={role}>{role}</option>)}
+                    </select>
+                    <button type="submit" className="mt-3 rounded-full bg-ink px-4 py-2 text-sm font-black text-white">Save member</button>
+                  </form>
+                </div>
+              ) : null}
+            </div>
             <div className="rounded-[2rem] border border-white/70 bg-ink p-5 text-white shadow-panel">
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/45">Environment</p>
               <h2 className="mt-2 text-2xl font-bold">Where things are configured</h2>
@@ -1802,6 +2174,17 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                         <span className="rounded-full bg-white/86 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/50 ring-1 ring-ink/6">
                           {(workflowProfiles[workflow.id] || defaultWorkflowAppProfile(workflowKinds[workflow.id] || "builder_app")).label}
                         </span>
+                        <span
+                          title={workflow.effective_role_source ? `Access from ${workflow.effective_role_source.replace("_", " ")}` : "Access role"}
+                          className="rounded-full bg-ink px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-white"
+                        >
+                          {workflow.effective_role || "No role"}
+                        </span>
+                        {workflow.workspace_name ? (
+                          <span className="rounded-full bg-lime/30 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-ink/55">
+                            {workflow.workspace_name}
+                          </span>
+                        ) : null}
                       </div>
                       {editingWorkflowId === workflow.id ? (
                         <form
@@ -1843,7 +2226,7 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                         workflow.is_published ? "bg-lime/40 text-ink" : "bg-mist text-ink/60"
                       }`}
                     >
-                      {workflow.is_published ? "Live" : workflow.status}
+                      {workflow.is_published ? `Live · ${workflow.published_visibility || "public"}` : workflow.status}
                     </span>
                   </div>
 
@@ -1867,7 +2250,9 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                     <button
                       type="button"
                       onClick={() => onOpenWorkflow(workflow.id)}
-                      className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
+                      disabled={!workflowCanEdit(workflow)}
+                      title={workflowCanEdit(workflow) ? "Open builder" : "You can view/run this workflow, but editing requires editor or owner access."}
+                      className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45"
                     >
                       Open Builder
                     </button>
@@ -1899,7 +2284,7 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                         <button type="button" onClick={() => onOpenWorkflowApp(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">App URL</button>
                         <button type="button" onClick={() => publishAndOpen(workflow.id)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">{canPublishAsChat(workflowKinds[workflow.id]) ? "Publish Chat" : "Open App"}</button>
                         <button type="button" onClick={() => void testRagHealth(workflow)} disabled={workflow.rag_chunk_count === 0} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-45">Test RAG</button>
-                        <button type="button" onClick={() => void lifecycleAction("duplicate", workflow)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink">Duplicate</button>
+                        <button type="button" onClick={() => void lifecycleAction("duplicate", workflow)} disabled={!canCreateInWorkspace(activeWorkspace)} className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-45">Duplicate</button>
                     {workflow.last_run_id ? (
                       <button
                         type="button"
@@ -1968,8 +2353,206 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
         </section>
         ) : null}
 
+        {activeView === "workspaces" ? (
+          <section className="mt-6 grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+            <div className="rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel backdrop-blur">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Workspace Control</p>
+                  <h2 className="mt-2 text-2xl font-bold">Teams, quotas, and access</h2>
+                  <p className="mt-1 text-sm text-ink/58">Choose your active workspace and manage members without digging through account settings.</p>
+                </div>
+                <span className="rounded-full bg-lime/30 px-3 py-1 text-xs font-bold text-ink">
+                  Active: {activeWorkspace?.name || "None"}
+                </span>
+              </div>
+
+              <div className="mt-5 grid gap-4">
+                {workspaces.map((workspace) => {
+                  const storageMb = Math.round((workspace.usage.storage_bytes / 1024 / 1024) * 10) / 10;
+                  const canManageWorkspace = isAdmin || workspace.current_user_role === "owner";
+                  const workspaceWorkflows = workflows.filter((workflow) => workflow.workspace_id === workspace.id);
+                  return (
+                    <article key={workspace.id} className={`rounded-[1.6rem] p-4 ring-1 ${activeWorkspaceId === workspace.id ? "bg-lime/18 ring-lime/35" : "bg-mist/65 ring-ink/5"}`}>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-lg font-black text-ink">{workspace.name}</p>
+                          <p className="mt-1 text-xs font-semibold text-ink/52">
+                            {workspace.slug} · role: {workspace.current_user_role || "viewer"}
+                            {currentUser?.default_workspace_id === workspace.id ? " · default" : ""}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => selectActiveWorkspace(workspace.id)} className="rounded-full bg-ink px-3 py-1.5 text-xs font-bold text-white">
+                            Use workspace
+                          </button>
+                          {currentUser?.default_workspace_id !== workspace.id ? (
+                            <button type="button" onClick={() => void makeDefaultWorkspace(workspace.id)} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-ink ring-1 ring-ink/6">
+                              Set default
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="mt-4 grid gap-2 md:grid-cols-4">
+                        <span className={`rounded-2xl px-3 py-2 text-xs font-bold ring-1 ${quotaClass(workspace.usage.workflow_count, workspace.workflow_limit)}`}>
+                          Workflows {workspace.usage.workflow_count}/{workspace.workflow_limit}
+                        </span>
+                        <span className={`rounded-2xl px-3 py-2 text-xs font-bold ring-1 ${quotaClass(workspace.usage.runs_last_30d, workspace.monthly_run_limit)}`}>
+                          Runs 30d {workspace.usage.runs_last_30d}/{workspace.monthly_run_limit}
+                        </span>
+                        <span className={`rounded-2xl px-3 py-2 text-xs font-bold ring-1 ${quotaClass(storageMb, workspace.storage_limit_mb)}`}>
+                          Storage {storageMb}MB/{workspace.storage_limit_mb}MB
+                        </span>
+                        <span className="rounded-2xl bg-white px-3 py-2 text-xs font-bold text-ink/62 ring-1 ring-ink/6">
+                          {workspace.usage.member_count} member(s)
+                        </span>
+                      </div>
+                      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                        <div className="rounded-[1.3rem] bg-white p-3 ring-1 ring-ink/6">
+                          <p className="text-xs font-black uppercase tracking-[0.2em] text-ink/42">Members</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {workspace.members.map((member) => (
+                              <span key={member.id} className="inline-flex items-center gap-2 rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink">
+                                {member.display_name}
+                                <span className="text-ink/45">{member.role}</span>
+                                {canManageWorkspace ? (
+                                  <button type="button" onClick={() => void removeWorkspaceMember(workspace.id, member.id)} className="text-coral">Remove</button>
+                                ) : null}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="rounded-[1.3rem] bg-white p-3 ring-1 ring-ink/6">
+                          <p className="text-xs font-black uppercase tracking-[0.2em] text-ink/42">Workflow access</p>
+                          <div className="mt-2 space-y-2">
+                            {workspaceWorkflows.slice(0, 5).map((workflow) => (
+                              <button key={workflow.id} type="button" onClick={() => onOpenWorkflow(workflow.id)} className="flex w-full items-center justify-between gap-2 rounded-2xl bg-mist/70 px-3 py-2 text-left text-xs font-semibold text-ink">
+                                <span className="truncate">{workflow.name}</span>
+                                <span className="shrink-0 text-ink/45">{workflow.effective_role || "viewer"}</span>
+                              </button>
+                            ))}
+                            {!workspaceWorkflows.length ? <p className="text-xs text-ink/50">No workflows in this workspace yet.</p> : null}
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+
+            <aside className="space-y-4">
+              {(isAdmin || activeWorkspace?.current_user_role === "owner") ? (
+                <div className="rounded-[2rem] bg-ink p-5 text-white shadow-panel">
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/45">Member Controls</p>
+                  {isAdmin ? (
+                    <form onSubmit={submitWorkspace} className="mt-4 rounded-[1.4rem] bg-white/8 p-3">
+                      <h3 className="font-black">Create workspace</h3>
+                      <input value={workspaceForm.name} onChange={(event) => setWorkspaceForm((current) => ({ ...current, name: event.target.value }))} placeholder="Claims Team" className="mt-3 w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                      <input value={workspaceForm.description} onChange={(event) => setWorkspaceForm((current) => ({ ...current, description: event.target.value }))} placeholder="Description" className="mt-2 w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                      <button type="submit" className="mt-3 w-full rounded-full bg-lime px-4 py-2 text-sm font-black text-ink">Create Workspace</button>
+                    </form>
+                  ) : null}
+                  <form onSubmit={submitWorkspaceMember} className="mt-4 rounded-[1.4rem] bg-white/8 p-3">
+                    <h3 className="font-black">Add / update member</h3>
+                    <select value={workspaceMemberForm.workspace_id || activeWorkspaceId || ""} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, workspace_id: Number(event.target.value) }))} className="mt-3 w-full rounded-2xl bg-white px-3 py-2 text-sm text-ink outline-none">
+                      {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+                    </select>
+                    <input value={workspaceMemberForm.email} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, email: event.target.value }))} placeholder="user@email.com" className="mt-2 w-full rounded-2xl bg-white px-3 py-2 text-sm text-ink outline-none" />
+                    <select value={workspaceMemberForm.role} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, role: event.target.value }))} className="mt-2 w-full rounded-2xl bg-white px-3 py-2 text-sm text-ink outline-none">
+                      <option value="viewer">viewer</option>
+                      <option value="runner">runner</option>
+                      <option value="editor">editor</option>
+                      <option value="owner">owner</option>
+                    </select>
+                    <button type="submit" className="mt-3 w-full rounded-full bg-white px-4 py-2 text-sm font-black text-ink">Save Member</button>
+                  </form>
+                </div>
+              ) : null}
+
+              <div className="rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Audit Log</p>
+                    <h3 className="mt-1 font-black">Workspace activity</h3>
+                  </div>
+                  <button type="button" onClick={() => void refreshWorkspaceAudit()} className="rounded-full bg-mist px-3 py-1.5 text-xs font-bold text-ink">Refresh</button>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {workspaceAuditLogs.slice(0, 12).map((event) => (
+                    <div key={event.id} className="rounded-2xl bg-mist/70 px-3 py-2 text-xs text-ink/62">
+                      <p className="font-black text-ink">{event.action}</p>
+                      <p className="mt-1">{new Date(event.created_at).toLocaleString()} · actor #{event.actor_user_id || "system"}</p>
+                    </div>
+                  ))}
+                  {!workspaceAuditLogs.length ? <p className="rounded-2xl bg-mist/70 px-3 py-3 text-sm text-ink/55">No workspace audit events yet.</p> : null}
+                </div>
+              </div>
+            </aside>
+          </section>
+        ) : null}
+
+        {activeView === "adminUsers" && isAdmin ? (
+          <section className="mt-6 rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel backdrop-blur">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Admin Users</p>
+                <h2 className="mt-2 text-2xl font-bold">Local user management</h2>
+                <p className="mt-1 text-sm text-ink/58">Promote admins, deactivate users, and assign default workspaces with audit trails.</p>
+              </div>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void refreshAdminUsers(adminUserSearch);
+                }}
+                className="flex rounded-full bg-mist p-1"
+              >
+                <input value={adminUserSearch} onChange={(event) => setAdminUserSearch(event.target.value)} placeholder="Search users" className="w-44 bg-transparent px-3 text-sm outline-none" />
+                <button type="submit" className="rounded-full bg-ink px-4 py-2 text-xs font-bold text-white">Search</button>
+              </form>
+            </div>
+            <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {adminUsers.map((user) => (
+                <article key={user.id} className="rounded-[1.45rem] bg-mist/70 p-4 ring-1 ring-ink/5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-black text-ink">{user.display_name}</p>
+                      <p className="mt-1 truncate text-xs text-ink/52">{user.email}</p>
+                    </div>
+                    <span className={`rounded-full px-3 py-1 text-xs font-bold ${user.is_active ? "bg-lime/35 text-ink" : "bg-coral/15 text-ink"}`}>
+                      {user.is_active ? "Active" : "Inactive"}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    <select value={user.role} onChange={(event) => void updateUserAsAdmin(user, { role: event.target.value as "admin" | "user" })} className="rounded-2xl bg-white px-3 py-2 text-sm font-semibold outline-none">
+                      <option value="user">user</option>
+                      <option value="admin">admin</option>
+                    </select>
+                    <select value={user.default_workspace_id || ""} onChange={(event) => void updateUserAsAdmin(user, { default_workspace_id: Number(event.target.value) })} className="rounded-2xl bg-white px-3 py-2 text-sm font-semibold outline-none">
+                      <option value="">No default workspace</option>
+                      {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`${user.is_active ? "Deactivate" : "Reactivate"} ${user.display_name}?`)) {
+                        void updateUserAsAdmin(user, { is_active: !user.is_active });
+                      }
+                    }}
+                    className="mt-3 rounded-full bg-white px-3 py-1.5 text-xs font-bold text-ink ring-1 ring-ink/6"
+                  >
+                    {user.is_active ? "Deactivate" : "Reactivate"}
+                  </button>
+                </article>
+              ))}
+              {!adminUsers.length ? <p className="rounded-[1.45rem] bg-mist/70 p-4 text-sm text-ink/58">No users loaded. Try refresh or adjust search.</p> : null}
+            </div>
+          </section>
+        ) : null}
+
         {activeView === "account" ? (
-          <section className="mt-6 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+          <section className="mt-6 grid gap-4 xl:grid-cols-[0.8fr_1.25fr_0.85fr]">
             <div className="rounded-[2rem] border border-white/70 bg-white/78 p-5 shadow-panel backdrop-blur">
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">
                 Local Users
@@ -2001,6 +2584,112 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                     Open Access Screen
                   </button>
                 </div>
+              )}
+            </div>
+            <div className="rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-panel backdrop-blur">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Account Workspaces</p>
+                  <h2 className="mt-2 text-2xl font-bold">Teams, roles, and quotas</h2>
+                  <p className="mt-1 text-sm text-ink/58">
+                    Choose your default workspace, review members, and manage admin-created team boundaries.
+                  </p>
+                </div>
+                <button type="button" onClick={() => void refreshProductSurfaces()} className="rounded-full bg-mist px-3 py-2 text-xs font-bold text-ink">
+                  Refresh
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3">
+                {workspaces.map((workspace) => {
+                  const storageMb = Math.round((workspace.usage.storage_bytes / 1024 / 1024) * 10) / 10;
+                  const canManageWorkspace = isAdmin || workspace.current_user_role === "owner";
+                  return (
+                    <article key={workspace.id} className="rounded-[1.45rem] bg-mist/70 p-4 ring-1 ring-ink/5">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-base font-black text-ink">{workspace.name}</p>
+                          <p className="mt-1 text-xs text-ink/55">
+                            {workspace.slug} · role: {workspace.current_user_role || "viewer"}
+                            {currentUser?.default_workspace_id === workspace.id ? " · default workspace" : ""}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {currentUser?.default_workspace_id !== workspace.id ? (
+                            <button type="button" onClick={() => void makeDefaultWorkspace(workspace.id)} className="rounded-full bg-ink px-3 py-1.5 text-xs font-bold text-white">
+                              Set default
+                            </button>
+                          ) : (
+                            <span className="rounded-full bg-lime/35 px-3 py-1.5 text-xs font-bold text-ink">Default</span>
+                          )}
+                          <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-ink">{workspace.usage.member_count} member(s)</span>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                        <InfoCard title="Workflows" body={`${workspace.usage.workflow_count}/${workspace.workflow_limit}`} />
+                        <InfoCard title="Runs 30d" body={`${workspace.usage.runs_last_30d}/${workspace.monthly_run_limit}`} />
+                        <InfoCard title="Storage" body={`${storageMb}MB/${workspace.storage_limit_mb}MB`} />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {workspace.members.map((member) => (
+                          <span key={member.id} className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[11px] font-semibold text-ink/68">
+                            {member.display_name} · {member.role}
+                            {canManageWorkspace ? (
+                              <button
+                                type="button"
+                                onClick={() => void removeWorkspaceMember(workspace.id, member.id)}
+                                className="rounded-full bg-ink/8 px-1.5 text-[10px] font-black text-ink/55 hover:bg-coral/20"
+                                aria-label={`Remove ${member.display_name}`}
+                              >
+                                x
+                              </button>
+                            ) : null}
+                          </span>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+                {!workspaces.length ? (
+                  <p className="rounded-[1.4rem] bg-mist/70 p-4 text-sm text-ink/58">
+                    No workspace membership found yet. Admins can create workspaces here after the backend migration runs.
+                  </p>
+                ) : null}
+              </div>
+
+              {isAdmin ? (
+                <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                  <form onSubmit={submitWorkspace} className="rounded-[1.4rem] bg-ink p-4 text-white">
+                    <p className="text-xs font-black uppercase tracking-[0.22em] text-white/42">Admin</p>
+                    <h3 className="mt-1 font-black">Create workspace</h3>
+                    <input value={workspaceForm.name} onChange={(event) => setWorkspaceForm((current) => ({ ...current, name: event.target.value }))} placeholder="Claims Team" className="mt-3 w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                    <input value={workspaceForm.description} onChange={(event) => setWorkspaceForm((current) => ({ ...current, description: event.target.value }))} placeholder="Workspace description" className="mt-2 w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <input value={workspaceForm.workflow_limit} onChange={(event) => setWorkspaceForm((current) => ({ ...current, workflow_limit: Number(event.target.value) || 1 }))} type="number" min={1} title="Workflow limit" className="w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                      <input value={workspaceForm.monthly_run_limit} onChange={(event) => setWorkspaceForm((current) => ({ ...current, monthly_run_limit: Number(event.target.value) || 1 }))} type="number" min={1} title="Monthly run limit" className="w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                      <input value={workspaceForm.storage_limit_mb} onChange={(event) => setWorkspaceForm((current) => ({ ...current, storage_limit_mb: Number(event.target.value) || 1 }))} type="number" min={1} title="Storage limit MB" className="w-full rounded-2xl bg-white/10 px-3 py-2 text-sm outline-none ring-1 ring-white/10" />
+                    </div>
+                    <p className="mt-1 text-[10px] font-semibold text-white/45">workflows · monthly runs · storage MB</p>
+                    <button type="submit" className="mt-3 rounded-full bg-lime px-4 py-2 text-sm font-black text-ink">Create Workspace</button>
+                  </form>
+
+                  <form onSubmit={submitWorkspaceMember} className="rounded-[1.4rem] bg-mist/70 p-4">
+                    <p className="text-xs font-black uppercase tracking-[0.22em] text-ink/42">Members</p>
+                    <h3 className="mt-1 font-black text-ink">Add user to workspace</h3>
+                    <select value={workspaceMemberForm.workspace_id} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, workspace_id: Number(event.target.value) }))} className="mt-3 w-full rounded-2xl bg-white px-3 py-2 text-sm outline-none">
+                      {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+                    </select>
+                    <input value={workspaceMemberForm.email} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, email: event.target.value }))} placeholder="user@email.com" className="mt-2 w-full rounded-2xl bg-white px-3 py-2 text-sm outline-none" />
+                    <select value={workspaceMemberForm.role} onChange={(event) => setWorkspaceMemberForm((current) => ({ ...current, role: event.target.value }))} className="mt-2 w-full rounded-2xl bg-white px-3 py-2 text-sm outline-none">
+                      {["member", "runner", "editor", "owner"].map((role) => <option key={role} value={role}>{role}</option>)}
+                    </select>
+                    <button type="submit" className="mt-3 rounded-full bg-ink px-4 py-2 text-sm font-black text-white">Save Member</button>
+                  </form>
+                </div>
+              ) : (
+                <p className="mt-4 rounded-[1.2rem] bg-mist/70 p-3 text-xs leading-5 text-ink/58">
+                  Workspace creation and member assignment are admin-only. Users can still set their default workspace and use workflows in workspaces where they are members.
+                </p>
               )}
             </div>
             <div className="rounded-[2rem] border border-white/70 bg-ink p-5 text-white shadow-panel">

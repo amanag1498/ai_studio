@@ -27,9 +27,16 @@ class AppUserRead(BaseModel):
     email: str
     display_name: str
     role: str
+    default_workspace_id: int | None = None
     is_active: bool
     created_at: datetime
     last_login_at: datetime | None
+
+
+class AdminUserUpdate(BaseModel):
+    role: str | None = Field(default=None, max_length=50)
+    is_active: bool | None = None
+    default_workspace_id: int | None = None
 
 
 class AuthResponse(BaseModel):

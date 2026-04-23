@@ -86,7 +86,7 @@ def validate_graph(graph: BuilderGraphPayload) -> ValidatedGraph:
 
 
 def list_workflows(session: Session, *, include_archived: bool = False) -> list[Workflow]:
-    statement = select(Workflow)
+    statement = select(Workflow).where(Workflow.is_template.is_(False))
     if not include_archived:
         statement = statement.where(Workflow.archived_at.is_(None))
     statement = statement.order_by(Workflow.updated_at.desc())
@@ -116,6 +116,7 @@ def create_workflow(
     description: str | None,
     validated_graph: ValidatedGraph,
     user_id: int | None = None,
+    workspace_id: int | None = None,
 ) -> Workflow:
     workflow = Workflow(
         name=name,
@@ -124,6 +125,7 @@ def create_workflow(
         current_version=validated_graph.graph_json["version"],
         latest_saved_version=0,
         graph_json=validated_graph.graph_json,
+        workspace_id=workspace_id,
         created_by_user_id=user_id,
         updated_by_user_id=user_id,
     )
@@ -178,7 +180,13 @@ def restore_workflow(session: Session, workflow: Workflow, *, user_id: int | Non
     return get_workflow_or_404(session, workflow.id)
 
 
-def duplicate_workflow(session: Session, workflow: Workflow, *, user_id: int | None = None) -> Workflow:
+def duplicate_workflow(
+    session: Session,
+    workflow: Workflow,
+    *,
+    user_id: int | None = None,
+    workspace_id: int | None = None,
+) -> Workflow:
     graph_json = dict(workflow.graph_json)
     graph_json["id"] = f"{graph_json.get('id', 'workflow')}-copy"
     graph_json["name"] = f"{workflow.name} Copy"
@@ -189,6 +197,7 @@ def duplicate_workflow(session: Session, workflow: Workflow, *, user_id: int | N
         description=workflow.description,
         validated_graph=validated_graph,
         user_id=user_id,
+        workspace_id=workspace_id if workspace_id is not None else workflow.workspace_id,
     )
 
 

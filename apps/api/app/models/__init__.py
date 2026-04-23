@@ -11,6 +11,8 @@ from app.models.workflow import (
     ConversationMemoryMessage,
     AppUser,
     AuthEvent,
+    Workspace,
+    WorkspaceMembership,
 )
 
 __all__ = [
@@ -26,4 +28,6 @@ __all__ = [
     "ConversationMemoryMessage",
     "AppUser",
     "AuthEvent",
+    "Workspace",
+    "WorkspaceMembership",
 ]

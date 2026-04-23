@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.workflow import AppUser, AuthEvent
+from app.services.workspaces import ensure_user_workspace
 
 
 def hash_password(password: str) -> str:
@@ -60,6 +61,7 @@ def create_local_user(
     )
     session.add(user)
     session.flush()
+    ensure_user_workspace(session, user)
     record_auth_event(session, "signup", user=user, email=normalized_email)
     session.commit()
     session.refresh(user)
