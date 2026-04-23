@@ -4,8 +4,11 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routes import ensure_workflow_access, workflow_effective_role
+from app.api.routes import import_workflow_bundle_route
 from app.models.workflow import Workflow, WorkflowRun, WorkspaceMembership
+from app.schemas.execution import ExecuteWorkflowRequest
 from app.services.auth import create_local_user
+from app.services.execution import create_workflow_run, execute_prepared_workflow_run
 from app.services.workspaces import ensure_user_workspace, ensure_workspace_can_create_workflow, ensure_workspace_can_run
 
 
@@ -142,3 +145,107 @@ def test_admin_override_allows_workspace_access(db_session):
 
     assert label == "Admin"
     assert source == "admin"
+
+
+def test_cyclic_prepared_run_fails_instead_of_staying_queued(db_session):
+    user = create_local_user(db_session, email="cycle@example.com", display_name="Cycle User", password="secret123")
+    workflow = Workflow(
+        name="Cycle Workflow",
+        description="execution preflight test",
+        status="draft",
+        current_version=1,
+        latest_saved_version=0,
+        graph_json={
+            "id": "cycle",
+            "name": "cycle",
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "chat_input-1",
+                    "type": "builderBlock",
+                    "position": {"x": 0, "y": 0},
+                    "data": {
+                        "blockType": "chat_input",
+                        "label": "Chat Input",
+                        "kind": "input",
+                        "category": "Inputs",
+                        "accentColor": "#fff",
+                        "icon": "CI",
+                        "inputs": [],
+                        "outputs": [{"id": "message", "label": "Message", "direction": "output", "dataTypes": ["chat", "text"]}],
+                        "config": {"placeholder": "Ask", "persistHistory": True},
+                    },
+                },
+                {
+                    "id": "chatbot-1",
+                    "type": "builderBlock",
+                    "position": {"x": 200, "y": 0},
+                    "data": {
+                        "blockType": "chatbot",
+                        "label": "Chatbot",
+                        "kind": "agent",
+                        "category": "AI",
+                        "accentColor": "#fff",
+                        "icon": "CB",
+                        "inputs": [
+                            {"id": "message", "label": "Message", "direction": "input", "dataTypes": ["chat", "text"], "required": True},
+                            {"id": "context", "label": "Context", "direction": "input", "dataTypes": ["knowledge", "text", "json"]},
+                        ],
+                        "outputs": [{"id": "reply", "label": "Reply", "direction": "output", "dataTypes": ["chat", "text"]}],
+                        "config": {"model": "test-model", "systemPrompt": "You are helpful.", "temperature": 0.2},
+                    },
+                },
+            ],
+            "edges": [
+                {"id": "ab", "source": "chat_input-1", "target": "chatbot-1", "sourceHandle": "out:message", "targetHandle": "in:message"},
+                {"id": "ba", "source": "chatbot-1", "target": "chatbot-1", "sourceHandle": "out:reply", "targetHandle": "in:context"},
+            ],
+        },
+        created_by_user_id=user.id,
+    )
+    db_session.add(workflow)
+    db_session.commit()
+    payload = ExecuteWorkflowRequest(trigger_mode="manual", session_id="s", user_id="u", inputs={})
+    run = create_workflow_run(db_session, workflow=workflow, graph=workflow.graph_json, payload=payload, owner_user_id=user.id)
+
+    failed_run = execute_prepared_workflow_run(db_session, run.id, payload)
+
+    assert failed_run.status == "failed"
+    assert "dag" in (failed_run.error_message or "").lower()
+
+
+def test_import_workflow_bundle_uses_validated_graph_name(db_session):
+    user = create_local_user(db_session, email="importer@example.com", display_name="Importer", password="secret123")
+    workspace = ensure_user_workspace(db_session, user)
+    payload = {
+        "workspace_id": workspace.id,
+        "graph_json": {
+            "id": "imported-graph",
+            "name": "Imported Test Workflow",
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "chat_input-1",
+                    "type": "builderBlock",
+                    "position": {"x": 0, "y": 0},
+                    "data": {
+                        "blockType": "chat_input",
+                        "label": "Chat Input",
+                        "kind": "input",
+                        "category": "Inputs",
+                        "accentColor": "#fff",
+                        "icon": "CI",
+                        "inputs": [],
+                        "outputs": [{"id": "message", "label": "Message", "direction": "output", "dataTypes": ["chat", "text"]}],
+                        "config": {"placeholder": "Ask", "persistHistory": True},
+                    },
+                }
+            ],
+            "edges": [],
+        },
+    }
+
+    workflow = import_workflow_bundle_route(payload, db=db_session, current_user_id=user.id)
+
+    assert workflow.name == "Imported Test Workflow Imported"
+    assert workflow.workspace_id == workspace.id

@@ -156,6 +156,16 @@ type RuntimeInputState = Record<
 type Diagnostic = {
   level: "error" | "warning" | "success";
   message: string;
+  title?: string;
+  why?: string;
+  fix?: string;
+};
+
+type WorkflowCapabilityInsight = {
+  label: string;
+  detail: string;
+  active: boolean;
+  tone: string;
 };
 
 type RunDisplayCard = {
@@ -403,13 +413,26 @@ function buildDiagnostics(
   runtimeInputs: RuntimeInputState,
 ): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  const cycleNodeIds = findCycleNodeIds(nodes, edges);
+  if (cycleNodeIds.length) {
+    diagnostics.push({
+      level: "error",
+      title: "Circular data flow detected",
+      message: `Cycle involves: ${cycleNodeIds.slice(0, 4).join(", ")}.`,
+      why: "The execution engine runs workflows as a DAG. If a block depends on its own downstream result, the engine cannot decide which block should run first.",
+      fix: "Remove one feedback edge. For this imported flow, remove Conversation Memory -> Chatbot, or keep memory before the chatbot without also writing the same chatbot reply back into that chatbot path.",
+    });
+  }
 
   for (const node of nodes) {
     const definition = getBlockDefinition(node.data.blockType);
     if (!definition) {
       diagnostics.push({
         level: "error",
+        title: "Unsupported block",
         message: `${node.data.label} uses an unknown block type.`,
+        why: "The backend does not know which executor should run this block.",
+        fix: "Replace this block with a supported marketplace block, or add a backend executor and registry entry for this block type.",
       });
       continue;
     }
@@ -418,7 +441,10 @@ function buildDiagnostics(
       if (!isInputConnected(node.id, input.id, edges)) {
         diagnostics.push({
           level: "error",
+          title: "Required input is not connected",
           message: `${node.data.label} needs a connected ${input.label} input.`,
+          why: "This block cannot run unless data reaches that required port.",
+          fix: `Connect a compatible upstream output into ${node.data.label} -> ${input.label}.`,
         });
       }
     }
@@ -430,19 +456,28 @@ function buildDiagnostics(
       if (runtimeInput.uploadStatus === "uploading") {
         diagnostics.push({
           level: "error",
+          title: "File upload is still running",
           message: `${node.data.label} is still uploading. Wait for the local upload to finish before running.`,
+          why: "The executor needs a local file path before downstream extraction or OCR blocks can run.",
+          fix: "Wait until the file says Ready, or remove the file branch if this is meant to be chat-only.",
         });
       }
       if (runtimeInput.uploadStatus === "error") {
         diagnostics.push({
           level: "error",
+          title: "File upload failed",
           message: `${node.data.label} upload failed: ${runtimeInput.uploadError || "choose the file again."}`,
+          why: "Downstream document blocks will receive no file payload.",
+          fix: "Choose the file again, use a supported extension, or select a file from the File Library.",
         });
       }
       if (isOutputConnected(node.id, "file", edges) && files.length === 0 && uploadedFiles.length === 0) {
         diagnostics.push({
           level: "error",
           message: `${node.data.label} needs at least one runtime file before running.`,
+          title: "Runtime file is missing",
+          why: "This File Upload block is connected to downstream document/OCR blocks, so a run needs a real file path.",
+          fix: "Open the Runtime/Inputs tab and upload or select a library file. If the workflow should be a pure chatbot, delete the File Upload -> OCR/document branch.",
         });
       }
     }
@@ -451,13 +486,19 @@ function buildDiagnostics(
       if (!isInputConnected(node.id, "document", edges)) {
         diagnostics.push({
           level: "warning",
+          title: "RAG can only retrieve old knowledge",
           message: `${node.data.label} has no document input, so it can only retrieve previously ingested knowledge.`,
+          why: "Without a document input, this run will not ingest the uploaded/extracted document.",
+          fix: "Connect Text Extraction -> RAG Knowledge document input if this workflow should ingest files during the run.",
         });
       }
       if (!isInputConnected(node.id, "query", edges)) {
         diagnostics.push({
           level: "warning",
+          title: "RAG query is missing",
           message: `${node.data.label} has no query input, so retrieval will return no chunks.`,
+          why: "Retrieval needs a user question or text query to search the collection.",
+          fix: "Connect Chat Input or Text Input to RAG Knowledge query input.",
         });
       }
     }
@@ -465,7 +506,10 @@ function buildDiagnostics(
     if (node.data.blockType === "text_extraction" && !isOutputConnected(node.id, "document", edges)) {
       diagnostics.push({
         level: "warning",
+        title: "Extracted document is unused",
         message: `${node.data.label} extracts documents, but its output is not connected to RAG, preview, or another block.`,
+        why: "The extraction work will happen, but users will not see or reuse the extracted text.",
+        fix: "Connect Document output to RAG Knowledge, Summarizer, Extraction AI, Dashboard Preview, or JSON Output.",
       });
     }
   }
@@ -473,18 +517,171 @@ function buildDiagnostics(
   if (nodes.length > 0 && !nodes.some((node) => ["chat_output", "json_output", "dashboard_preview"].includes(node.data.blockType))) {
     diagnostics.push({
       level: "warning",
+      title: "No visible output block",
       message: "Add an output block to make run results visible.",
+      why: "The run may execute, but users will not get a clean chat, JSON, or dashboard result.",
+      fix: "Add Chat Output, JSON Output, Dashboard/Preview, or Logger.",
     });
   }
 
   if (diagnostics.length === 0) {
     diagnostics.push({
       level: "success",
+      title: "Workflow looks runnable",
       message: "Workflow looks runnable. Provide runtime inputs and click Run Current Graph.",
+      why: "No blocking wiring or runtime-input issues were detected.",
+      fix: "Run once, then inspect output cards and data-flow previews.",
     });
   }
 
   return diagnostics;
+}
+
+function diagnosticToneClasses(level: Diagnostic["level"]) {
+  if (level === "error") return "border-coral/30 bg-coral/12";
+  if (level === "warning") return "border-sand bg-sand/45";
+  return "border-lime/30 bg-lime/20";
+}
+
+function diagnosticBadgeClasses(level: Diagnostic["level"]) {
+  if (level === "error") return "bg-coral/20 text-ink";
+  if (level === "warning") return "bg-sand text-ink";
+  return "bg-lime/35 text-ink";
+}
+
+function findCycleNodeIds(nodes: BuilderNode[], edges: BuilderEdge[]) {
+  const indegree = new Map(nodes.map((node) => [node.id, 0]));
+  const outgoing = new Map<string, string[]>();
+  for (const node of nodes) {
+    outgoing.set(node.id, []);
+  }
+  for (const edge of edges) {
+    if (!indegree.has(edge.source) || !indegree.has(edge.target)) continue;
+    outgoing.get(edge.source)?.push(edge.target);
+    indegree.set(edge.target, (indegree.get(edge.target) || 0) + 1);
+  }
+  const queue = nodes.filter((node) => (indegree.get(node.id) || 0) === 0).map((node) => node.id);
+  const visited = new Set<string>();
+  while (queue.length) {
+    const nodeId = queue.shift() as string;
+    visited.add(nodeId);
+    for (const targetId of outgoing.get(nodeId) || []) {
+      indegree.set(targetId, (indegree.get(targetId) || 0) - 1);
+      if ((indegree.get(targetId) || 0) === 0) {
+        queue.push(targetId);
+      }
+    }
+  }
+  return nodes.filter((node) => !visited.has(node.id)).map((node) => node.data.label || node.id);
+}
+
+function getWorkflowCapabilities(graph: BuilderGraph): WorkflowCapabilityInsight[] {
+  const blockTypes = new Set(graph.nodes.map((node) => node.data.blockType));
+  return [
+    {
+      label: "Inputs",
+      detail: blockTypes.has("file_upload")
+        ? "accepts runtime documents"
+        : blockTypes.has("chat_input")
+          ? "accepts chat messages"
+          : blockTypes.has("text_input")
+            ? "accepts text input"
+            : "add Chat/Text/File input",
+      active: Boolean(blockTypes.has("file_upload") || blockTypes.has("chat_input") || blockTypes.has("text_input")),
+      tone: "bg-lime/25",
+    },
+    {
+      label: "Document AI",
+      detail: blockTypes.has("text_extraction") || blockTypes.has("extraction_ai") || blockTypes.has("summarizer")
+        ? "extracts or transforms document text"
+        : "optional extraction/summarizer layer",
+      active: Boolean(blockTypes.has("text_extraction") || blockTypes.has("extraction_ai") || blockTypes.has("summarizer")),
+      tone: "bg-sand/60",
+    },
+    {
+      label: "Knowledge",
+      detail: blockTypes.has("rag_knowledge")
+        ? "RAG retrieval/indexing is wired"
+        : "add RAG for cited answers",
+      active: blockTypes.has("rag_knowledge"),
+      tone: "bg-mist",
+    },
+    {
+      label: "AI Reasoning",
+      detail: blockTypes.has("chatbot")
+        ? "LLM response block present"
+        : blockTypes.has("classifier") || blockTypes.has("extraction_ai")
+          ? "structured AI block present"
+          : "add Chatbot or AI block",
+      active: Boolean(blockTypes.has("chatbot") || blockTypes.has("classifier") || blockTypes.has("extraction_ai")),
+      tone: "bg-coral/15",
+    },
+    {
+      label: "Memory/Logic",
+      detail: blockTypes.has("conversation_memory")
+        ? "session history available"
+        : blockTypes.has("condition") || blockTypes.has("merge")
+          ? "branching/merge logic available"
+          : "optional memory or routing",
+      active: Boolean(blockTypes.has("conversation_memory") || blockTypes.has("condition") || blockTypes.has("merge")),
+      tone: "bg-white",
+    },
+    {
+      label: "Outputs",
+      detail: blockTypes.has("dashboard_preview")
+        ? "dashboard preview available"
+        : blockTypes.has("chat_output")
+          ? "chat output available"
+          : blockTypes.has("json_output")
+            ? "JSON output available"
+            : "add output for visible results",
+      active: Boolean(blockTypes.has("dashboard_preview") || blockTypes.has("chat_output") || blockTypes.has("json_output") || blockTypes.has("logger")),
+      tone: "bg-lime/20",
+    },
+  ];
+}
+
+function getWorkflowReadinessScore(graph: BuilderGraph, diagnostics: Diagnostic[]) {
+  const capabilities = getWorkflowCapabilities(graph);
+  const activeCapabilities = capabilities.filter((capability) => capability.active).length;
+  const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error").length;
+  const warnings = diagnostics.filter((diagnostic) => diagnostic.level === "warning").length;
+  const hasConnections = graph.edges.length > 0 || graph.nodes.length <= 1;
+  const base = graph.nodes.length ? 30 : 0;
+  const capabilityScore = Math.round((activeCapabilities / capabilities.length) * 45);
+  const connectionScore = hasConnections ? 15 : 0;
+  const penalty = errors * 18 + warnings * 6;
+  return Math.max(0, Math.min(100, base + capabilityScore + connectionScore + 10 - penalty));
+}
+
+function getWorkflowNextActions(graph: BuilderGraph, diagnostics: Diagnostic[]) {
+  const blockTypes = new Set(graph.nodes.map((node) => node.data.blockType));
+  const actions: string[] = [];
+  for (const diagnostic of diagnostics.filter((item) => item.level === "error")) {
+    if (diagnostic.fix) actions.push(diagnostic.fix);
+  }
+  if (!blockTypes.has("chat_input") && !blockTypes.has("text_input") && !blockTypes.has("file_upload")) {
+    actions.push("Add a Chat Input, Text Input, or File Upload block so the workflow can receive runtime data.");
+  }
+  if (graph.nodes.length > 1 && graph.edges.length === 0) {
+    actions.push("Connect blocks so data can move through the DAG instead of running isolated nodes.");
+  }
+  if (blockTypes.has("file_upload") && !blockTypes.has("text_extraction")) {
+    actions.push("Add Text Extraction after File Upload so documents become usable text/document payloads.");
+  }
+  if (blockTypes.has("text_extraction") && !blockTypes.has("rag_knowledge") && !blockTypes.has("summarizer") && !blockTypes.has("extraction_ai")) {
+    actions.push("Send extracted text into RAG Knowledge, Summarizer, Extraction AI, or Dashboard Preview.");
+  }
+  if (blockTypes.has("rag_knowledge") && !blockTypes.has("chatbot")) {
+    actions.push("Add Chatbot after RAG Knowledge when you want natural answers over retrieved chunks.");
+  }
+  if (!blockTypes.has("chat_output") && !blockTypes.has("json_output") && !blockTypes.has("dashboard_preview")) {
+    actions.push("Add Chat Output, JSON Output, or Dashboard/Preview so users can see the result.");
+  }
+  if (diagnostics.some((diagnostic) => diagnostic.level === "error")) {
+    actions.push("Fix red blockers before running. The API will reject workflows with required inputs missing.");
+  }
+  return Array.from(new Set(actions)).slice(0, 5);
 }
 
 function getBlockGuide(blockType: string) {
@@ -1193,6 +1390,9 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
   const currentGraph = toBuilderGraph(nodes, edges);
   const isCurrentChatWorkflow = isChatWorkflow(currentGraph);
   const blockerCount = diagnostics.filter((item) => item.level === "error").length;
+  const readinessScore = getWorkflowReadinessScore(currentGraph, diagnostics);
+  const capabilityInsights = getWorkflowCapabilities(currentGraph);
+  const nextActions = getWorkflowNextActions(currentGraph, diagnostics);
   const workflowModeLabel = getBuilderWorkflowModeLabel(currentGraph);
   const runDisplayCards = getRunDisplayCards(lastRun, nodes);
   const connectedNodeIds = getConnectedNodeIds(selectedNode, edges as BuilderEdge[]);
@@ -1271,6 +1471,9 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       diagnostics,
       blockerCount: diagnostics.filter((item) => item.level === "error").length,
       warningCount: diagnostics.filter((item) => item.level === "warning").length,
+      readinessScore: getWorkflowReadinessScore(graph, diagnostics),
+      capabilityInsights: getWorkflowCapabilities(graph),
+      nextActions: getWorkflowNextActions(graph, diagnostics),
       runtimeSummary,
       ragCount: graph.nodes.filter((node) => node.data.blockType === "rag_knowledge").length,
       llmCount: graph.nodes.filter((node) => ["chatbot", "summarizer", "classifier", "extraction_ai"].includes(node.data.blockType)).length,
@@ -2768,6 +2971,15 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
 
   async function openSaveDialog() {
     const graph = toBuilderGraph(nodes, edges);
+    const blockingDiagnostics = buildDiagnostics(graph.nodes, graph.edges, runtimeInputs).filter(
+      (diagnostic) => diagnostic.level === "error",
+    );
+    if (blockingDiagnostics.length > 0) {
+      setIsInspectorOpen(true);
+      setInspectorTab("fixes");
+      setStatusMessage(`Cannot save this workflow yet. Fix ${blockingDiagnostics.length} blocker(s) first.`);
+      return;
+    }
     const hasChanges = await hasUnsavedGraphChanges(graph);
     if (!hasChanges) {
       setStatusMessage("No workflow changes detected. Make a graph/config change before saving a new version.");
@@ -2784,6 +2996,16 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       return;
     }
     const graph = toBuilderGraph(nodes, edges);
+    const blockingDiagnostics = buildDiagnostics(graph.nodes, graph.edges, runtimeInputs).filter(
+      (diagnostic) => diagnostic.level === "error",
+    );
+    if (blockingDiagnostics.length > 0) {
+      setIsSaveDialogOpen(false);
+      setIsInspectorOpen(true);
+      setInspectorTab("fixes");
+      setStatusMessage(`Save blocked. Resolve ${blockingDiagnostics.length} blocker(s) before creating a new workflow version.`);
+      return;
+    }
     const hasChanges = await hasUnsavedGraphChanges(graph);
     if (!hasChanges) {
       setIsSaveDialogOpen(false);
@@ -2968,11 +3190,30 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
               <ClipboardCheck className="h-3.5 w-3.5" aria-hidden />
               {blockerCount ? `${blockerCount} blockers` : "Ready"}
             </span>
+            <button
+              type="button"
+              onClick={() => setIsPreRunOpen(true)}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black ring-1 ring-ink/8 ${readinessScore >= 80 ? "bg-lime/35 text-ink" : readinessScore >= 55 ? "bg-sand/70 text-ink" : "bg-coral/20 text-ink"}`}
+              title="Open readiness checklist"
+            >
+              {readinessScore}% ready
+            </button>
             {presence.length ? (
               <span className="hidden items-center gap-1.5 rounded-full bg-sand/70 px-3 py-1.5 text-[11px] font-bold text-ink md:inline-flex">
                 {presence.length} editing now
               </span>
             ) : null}
+          </div>
+          <div className="pointer-events-auto mt-2 hidden max-w-4xl gap-2 overflow-x-auto rounded-full border border-white/60 bg-white/65 px-2.5 py-2 shadow-sm backdrop-blur xl:flex">
+            {capabilityInsights.map((capability) => (
+              <span
+                key={capability.label}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-bold ring-1 ring-ink/6 ${capability.active ? capability.tone : "bg-white/60 text-ink/35"}`}
+                title={capability.detail}
+              >
+                {capability.label}: {capability.active ? "on" : "missing"}
+              </span>
+            ))}
           </div>
         </header>
 
@@ -4144,25 +4385,42 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
 
             <div className={`mt-5 rounded-[1.6rem] bg-white p-4 ring-1 ring-ink/6 ${inspectorTab === "fixes" ? "" : "hidden"}`}>
               <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-ink">Run Readiness</p>
+                <div>
+                  <p className="text-sm font-semibold text-ink">Run Readiness</p>
+                  <p className="mt-1 text-xs leading-5 text-ink/55">
+                    Blockers stop execution. Missing capability chips are suggestions, not always errors.
+                  </p>
+                </div>
                 <span className="rounded-full bg-mist px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-ink/55">
                   {diagnostics.filter((item) => item.level === "error").length} blockers
                 </span>
               </div>
               <div className="mt-3 space-y-2">
                 {diagnostics.map((diagnostic) => (
-                  <p
+                  <article
                     key={diagnostic.message}
-                    className={`rounded-2xl px-3 py-2 text-xs leading-5 ${
-                      diagnostic.level === "error"
-                        ? "bg-coral/18 text-ink"
-                        : diagnostic.level === "warning"
-                          ? "bg-sand/60 text-ink/75"
-                          : "bg-lime/30 text-ink"
-                    }`}
+                    className={`rounded-2xl border px-3 py-3 text-xs leading-5 ${diagnosticToneClasses(diagnostic.level)}`}
                   >
-                    {diagnostic.message}
-                  </p>
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="font-black text-ink">{diagnostic.title || diagnostic.message}</p>
+                        <p className="mt-1 text-ink/68">{diagnostic.message}</p>
+                      </div>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.16em] ${diagnosticBadgeClasses(diagnostic.level)}`}>
+                        {diagnostic.level}
+                      </span>
+                    </div>
+                    {diagnostic.why ? (
+                      <p className="mt-2 rounded-xl bg-white/65 px-3 py-2 text-ink/65">
+                        <strong>Why:</strong> {diagnostic.why}
+                      </p>
+                    ) : null}
+                    {diagnostic.fix ? (
+                      <p className="mt-2 rounded-xl bg-white px-3 py-2 text-ink">
+                        <strong>Fix:</strong> {diagnostic.fix}
+                      </p>
+                    ) : null}
+                  </article>
                 ))}
               </div>
             </div>
@@ -4500,7 +4758,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
             />
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               <p className="text-xs leading-5 text-ink/50">
-                Tip: mention nodes added, removed, rewired, config changes, or why this version matters.
+                Tip: saving is blocked when run-readiness has blocker errors. Fix wiring/runtime blockers first, then save a reviewable version note.
               </p>
               <button
                 type="button"
@@ -4516,7 +4774,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
       ) : null}
       {preRunChecklist ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-ink/28 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-[2rem] bg-white p-5 shadow-panel">
+          <div className="w-full max-w-4xl rounded-[2rem] bg-white p-5 shadow-panel">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">
@@ -4531,7 +4789,7 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                 Close
               </button>
             </div>
-            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <div className="mt-4 grid gap-3 sm:grid-cols-4">
               <div className={`rounded-2xl p-4 ${preRunChecklist.blockerCount ? "bg-coral/15" : "bg-lime/25"}`}>
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Blockers</p>
                 <p className="mt-1 text-2xl font-bold">{preRunChecklist.blockerCount}</p>
@@ -4541,24 +4799,65 @@ function BuilderCanvas({ workflowId, onBack, onOpenChat, onOpenRun }: BuilderPag
                 <p className="mt-1 text-2xl font-bold">{preRunChecklist.warningCount}</p>
               </div>
               <div className="rounded-2xl bg-mist p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Readiness</p>
+                <p className="mt-1 text-2xl font-bold">{preRunChecklist.readinessScore}%</p>
+              </div>
+              <div className="rounded-2xl bg-mist p-4">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-ink/45">Owner</p>
                 <p className="mt-1 truncate text-sm font-bold">{preRunChecklist.user?.display_name || preRunChecklist.user?.email || "local user"}</p>
               </div>
             </div>
-            <div className="mt-4 max-h-64 overflow-auto rounded-[1.4rem] bg-mist/70 p-4">
-              <p className="text-sm font-semibold">Inputs and checks</p>
-              <div className="mt-3 space-y-2">
-                {preRunChecklist.runtimeSummary.map((item) => (
-                  <p key={item} className="rounded-2xl bg-white px-3 py-2 text-xs text-ink/70">{item}</p>
-                ))}
-                {preRunChecklist.diagnostics.map((item) => (
-                  <p key={item.message} className={`rounded-2xl px-3 py-2 text-xs ${item.level === "error" ? "bg-coral/15" : item.level === "warning" ? "bg-sand/60" : "bg-lime/25"}`}>
-                    {item.message}
+            <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_0.85fr]">
+              <div className="max-h-80 overflow-auto rounded-[1.4rem] bg-mist/70 p-4">
+                <p className="text-sm font-semibold">Inputs and checks</p>
+                <div className="mt-3 space-y-2">
+                  {preRunChecklist.runtimeSummary.map((item) => (
+                    <p key={item} className="rounded-2xl bg-white px-3 py-2 text-xs text-ink/70">{item}</p>
+                  ))}
+                  {preRunChecklist.diagnostics.map((item) => (
+                    <article key={item.message} className={`rounded-2xl border px-3 py-3 text-xs ${diagnosticToneClasses(item.level)}`}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-black text-ink">{item.title || item.message}</p>
+                          <p className="mt-1 leading-5 text-ink/65">{item.message}</p>
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-bold uppercase ${diagnosticBadgeClasses(item.level)}`}>
+                          {item.level}
+                        </span>
+                      </div>
+                      {item.why ? <p className="mt-2 text-ink/60"><strong>Why:</strong> {item.why}</p> : null}
+                      {item.fix ? <p className="mt-1 text-ink"><strong>Fix:</strong> {item.fix}</p> : null}
+                    </article>
+                  ))}
+                  <p className="rounded-2xl bg-white px-3 py-2 text-xs text-ink/60">
+                    OpenRouter is configured on the backend via OPENROUTER_API_KEY. If it is missing, the run will fail with a provider error.
                   </p>
-                ))}
-                <p className="rounded-2xl bg-white px-3 py-2 text-xs text-ink/60">
-                  OpenRouter is configured on the backend via OPENROUTER_API_KEY. If it is missing, the run will fail with a provider error.
-                </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="rounded-[1.4rem] bg-ink p-4 text-white">
+                  <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/42">Capability Map</p>
+                  <p className="mt-1 text-xs leading-5 text-white/55">
+                    Missing means this workflow does not use that capability. It is only a blocker when listed in Inputs and checks.
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {preRunChecklist.capabilityInsights.map((capability) => (
+                      <div key={capability.label} className={`rounded-2xl px-3 py-2 text-xs ${capability.active ? "bg-white/12" : "bg-white/5 text-white/45"}`}>
+                        <p className="font-black">{capability.label}</p>
+                        <p className="mt-1 leading-4">{capability.detail}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-[1.4rem] bg-sand/55 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.25em] text-ink/45">Suggested Next Actions</p>
+                  <div className="mt-3 space-y-2">
+                    {(preRunChecklist.nextActions.length ? preRunChecklist.nextActions : ["Workflow looks ready. Run once, then inspect output cards and data flow previews."]).map((action) => (
+                      <p key={action} className="rounded-2xl bg-white/75 px-3 py-2 text-xs leading-5 text-ink/68">{action}</p>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
             <div className="mt-4 flex flex-wrap justify-end gap-2">

@@ -154,8 +154,19 @@ def execute_prepared_workflow_run(
     if workflow_run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found.")
     workflow = get_workflow_or_404(session, workflow_run.workflow_id)
-    graph = validate_graph_json(workflow_run.graph_snapshot or workflow.graph_json)
-    ordered_nodes, outgoing_edges = topological_order(graph)
+    try:
+        graph = validate_graph_json(workflow_run.graph_snapshot or workflow.graph_json)
+        ordered_nodes, outgoing_edges = topological_order(graph)
+    except Exception as exc:  # noqa: BLE001
+        workflow_run.status = "failed"
+        workflow_run.completed_at = utc_now_naive()
+        workflow_run.error_message = extract_exception_detail(exc)
+        workflow_run.log_messages = list(workflow_run.log_messages or []) + [
+            log_entry("error", workflow_run.error_message),
+        ]
+        session.add(workflow_run)
+        session.commit()
+        return get_run_or_404(session, workflow_run.workflow_id, workflow_run.id)
     workflow_started_perf = perf_counter()
     workflow_run.status = "running"
     workflow_run.started_at = utc_now_naive()
@@ -264,6 +275,13 @@ def execute_prepared_workflow_run(
     except HTTPException:
         session.rollback()
         raise
+
+
+def extract_exception_detail(exc: Exception) -> str:
+    detail = getattr(exc, "detail", None)
+    if detail:
+        return str(detail)
+    return str(exc) or exc.__class__.__name__
 
 
 def get_run_or_404(session: Session, workflow_id: int, run_id: int) -> WorkflowRun:

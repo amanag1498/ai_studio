@@ -187,10 +187,12 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
   const [marketplaceBlocks, setMarketplaceBlocks] = useState<BlockMarketplaceItem[]>([]);
   const [fileLibrary, setFileLibrary] = useState<FileLibraryItem[]>([]);
   const [bundleImportText, setBundleImportText] = useState("");
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [appTypeFilter, setAppTypeFilter] = useState<"all" | WorkflowLaunchKind>("all");
   const [complexityFilter, setComplexityFilter] = useState<"all" | "basic" | "advanced" | "custom">("all");
+  const [workflowDensity, setWorkflowDensity] = useState<"compact" | "rich">("compact");
   const [editingWorkflowId, setEditingWorkflowId] = useState<number | null>(null);
   const [editingWorkflowName, setEditingWorkflowName] = useState("");
   const [activeView, setActiveView] = useState<HomeView>("workflows");
@@ -674,6 +676,7 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
       const bundle = JSON.parse(bundleImportText) as Record<string, unknown>;
       const workflow = await importWorkflowBundle(bundle, activeWorkspace?.id || undefined);
       setBundleImportText("");
+      setIsImportDialogOpen(false);
       setStatusMessage(`Imported ${workflow.name}.`);
       await refreshAll();
       onOpenWorkflow(workflow.id);
@@ -1161,14 +1164,22 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                   <NavIcon name="folder" className="h-4 w-4" />
                   Files
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveView("create")}
-                  className="inline-flex items-center gap-2 rounded-full bg-lime px-4 py-2 text-sm font-black text-ink shadow-[0_16px_34px_rgba(182,255,135,0.18)] transition hover:brightness-95"
-                >
-                  <NavIcon name="spark" className="h-4 w-4" />
-                  Create
-                </button>
+              <button
+                type="button"
+                onClick={() => setActiveView("create")}
+                className="inline-flex items-center gap-2 rounded-full bg-lime px-4 py-2 text-sm font-black text-ink shadow-[0_16px_34px_rgba(182,255,135,0.18)] transition hover:brightness-95"
+              >
+                <NavIcon name="spark" className="h-4 w-4" />
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsImportDialogOpen(true)}
+                className="inline-flex items-center gap-2 rounded-full bg-white/12 px-4 py-2 text-sm font-bold text-white ring-1 ring-white/12 backdrop-blur transition hover:bg-white/18"
+              >
+                <NavIcon name="bundle" className="h-4 w-4" />
+                Import
+              </button>
               </div>
             </header>
 
@@ -1205,6 +1216,15 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
               >
                 Blank AI workflow
                 <span className="mt-1 block text-xs font-semibold text-ink/55">Chat input, memory, chatbot, and output starter graph.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsImportDialogOpen(true)}
+                disabled={!canCreateInWorkspace(activeWorkspace)}
+                className="mt-3 w-full rounded-[1.4rem] bg-white/12 px-5 py-4 text-left text-sm font-bold text-white ring-1 ring-white/10 transition hover:bg-white/16 disabled:opacity-45"
+              >
+                Import workflow bundle
+                <span className="mt-1 block text-xs font-semibold text-white/50">Paste exported AI Studio JSON into {activeWorkspace?.name || "the active workspace"}.</span>
               </button>
               <div className="mt-4 grid gap-2">
                 {guidedRecipes.map((recipe) => (
@@ -2029,6 +2049,20 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
               <span className="rounded-full bg-mist px-4 py-2 text-xs font-semibold uppercase tracking-[0.25em] text-ink/55">
                 {filteredWorkflows.length}/{workflows.length} shown
               </span>
+              <div className="flex rounded-full bg-mist p-1">
+                {(["compact", "rich"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setWorkflowDensity(mode)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-black uppercase tracking-[0.16em] ${
+                      workflowDensity === mode ? "bg-ink text-white" : "text-ink/52"
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={() => setShowArchived((current) => !current)}
@@ -2160,13 +2194,13 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
               </p>
             </div>
           ) : (
-            <div className="grid gap-4 xl:grid-cols-3">
+            <div className={`grid gap-4 ${workflowDensity === "compact" ? "xl:grid-cols-2" : "xl:grid-cols-3"}`}>
               {filteredWorkflows.map((workflow) => (
                 <article
                   key={workflow.id}
-                  className="group overflow-hidden rounded-[1.8rem] border border-ink/8 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel"
+                  className={`group overflow-hidden border border-ink/8 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-panel ${workflowDensity === "compact" ? "rounded-[1.45rem]" : "rounded-[1.8rem]"}`}
                 >
-                  <div className="bg-[radial-gradient(circle_at_top_left,_rgba(182,255,135,0.34),_transparent_36%),linear-gradient(135deg,_#ffffff,_#f8f4e8)] p-4">
+                  <div className={`bg-[radial-gradient(circle_at_top_left,_rgba(182,255,135,0.34),_transparent_36%),linear-gradient(135deg,_#ffffff,_#f8f4e8)] ${workflowDensity === "compact" ? "p-3" : "p-4"}`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-1.5">
@@ -2230,7 +2264,7 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                     </span>
                   </div>
 
-                  <div className="mt-4 flex items-center gap-4 text-xs font-semibold text-ink/58">
+                  <div className={`mt-4 flex flex-wrap items-center gap-3 text-xs font-semibold text-ink/58 ${workflowDensity === "compact" ? "hidden sm:flex" : ""}`}>
                     <span>v{workflow.current_version || 1}</span>
                     <span>{workflow.run_count} run{workflow.run_count === 1 ? "" : "s"}</span>
                     <span>{workflow.quality_score}% quality</span>
@@ -2238,7 +2272,7 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                   </div>
                   </div>
 
-                  <div className="p-4">
+                  <div className={workflowDensity === "compact" ? "p-3" : "p-4"}>
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -2272,6 +2306,7 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                     </button>
                   </div>
 
+                  {workflowDensity === "rich" ? (
                   <details className="mt-3 rounded-[1.25rem] bg-mist/45 px-3 py-2">
                     <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.2em] text-ink/48">
                       More actions
@@ -2345,6 +2380,25 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
                       </div>
                     </div>
                   </details>
+                  ) : (
+                    <div className="mt-3 flex flex-wrap gap-2 border-t border-ink/6 pt-3">
+                      {workflow.last_run_id ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            window.history.pushState({}, "", `/runs/${workflow.id}/${workflow.last_run_id}`);
+                            window.dispatchEvent(new Event("vmb:navigate"));
+                          }}
+                          className="rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink"
+                        >
+                          Latest Run
+                        </button>
+                      ) : null}
+                      <button type="button" onClick={() => void openPermissions(workflow)} className="rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink">Permissions</button>
+                      <button type="button" onClick={() => void openCollaboration(workflow)} className="rounded-full bg-mist px-3 py-1.5 text-xs font-semibold text-ink">Activity</button>
+                      <button type="button" onClick={() => void lifecycleAction("duplicate", workflow)} disabled={!canCreateInWorkspace(activeWorkspace)} className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-ink ring-1 ring-ink/8 disabled:opacity-45">Duplicate</button>
+                    </div>
+                  )}
                   </div>
                 </article>
               ))}
@@ -2979,6 +3033,48 @@ export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, o
               {!permissions.length ? (
                 <p className="rounded-[1.25rem] bg-mist/70 p-4 text-sm text-ink/58">No extra local users have access metadata yet.</p>
               ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isImportDialogOpen ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/28 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-3xl rounded-[2rem] bg-white p-5 shadow-panel">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">Import Workflow</p>
+                <h2 className="mt-2 text-2xl font-bold">Paste an AI Studio bundle</h2>
+                <p className="mt-1 text-sm text-ink/58">
+                  This imports into <strong>{activeWorkspace?.name || "the active workspace"}</strong>. You need owner/editor access.
+                </p>
+              </div>
+              <button type="button" onClick={() => setIsImportDialogOpen(false)} className="rounded-full bg-mist px-4 py-2 text-sm font-semibold">
+                Close
+              </button>
+            </div>
+            <textarea
+              value={bundleImportText}
+              onChange={(event) => setBundleImportText(event.target.value)}
+              placeholder='{"format":"ai-studio-workflow-bundle","graph_json":{...}}'
+              className="mt-4 min-h-72 w-full rounded-[1.35rem] border border-ink/10 bg-mist/55 p-4 font-mono text-xs text-ink outline-none placeholder:text-ink/35"
+            />
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs leading-5 text-ink/52">
+                Tip: export any workflow from its card, then paste that JSON here to clone it into another workspace or VPS.
+              </p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setIsImportDialogOpen(false)} className="rounded-full bg-mist px-4 py-2 text-sm font-semibold text-ink">
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void importBundle()}
+                  disabled={!bundleImportText.trim() || !canCreateInWorkspace(activeWorkspace)}
+                  className="rounded-full bg-ink px-5 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  Import Workflow
+                </button>
+              </div>
             </div>
           </div>
         </div>

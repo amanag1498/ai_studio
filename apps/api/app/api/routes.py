@@ -1265,7 +1265,7 @@ def import_workflow_bundle_route(
         ensure_workspace_can_create_workflow(db, workspace)
     workflow = create_workflow(
         db,
-        name=validated_graph.name,
+        name=str(validated_graph.graph_json.get("name") or "Imported Workflow"),
         description="Imported from AI Studio project bundle.",
         validated_graph=validated_graph,
         user_id=current_user_id,

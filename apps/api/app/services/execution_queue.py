@@ -78,6 +78,8 @@ def run_workflow_job(run_id: int, payload_data: dict[str, Any]) -> None:
             time.sleep(max(settings.execution_queue_retry_backoff_seconds, 0))
             with SessionLocal() as session:
                 reset_run_for_retry(session, run_id, attempt + 1)
+    except Exception as exc:  # noqa: BLE001
+        mark_run_failed(run_id, f"Queue worker failed before completion: {extract_error_detail(exc)}")
     finally:
         with queue_lock:
             active_jobs.pop(run_id, None)
@@ -141,6 +143,28 @@ def mark_run_cancelled(run_id: int, message: str) -> None:
         run.log_messages = logs
         session.add(run)
         session.commit()
+
+
+def mark_run_failed(run_id: int, message: str) -> None:
+    with SessionLocal() as session:
+        run = session.get(WorkflowRun, run_id)
+        if run is None or run.status in {"completed", "failed", "cancelled"}:
+            return
+        run.status = "failed"
+        run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        run.error_message = message
+        logs = list(run.log_messages or [])
+        logs.append({"level": "error", "message": message, "timestamp": datetime.now(timezone.utc).isoformat()})
+        run.log_messages = logs
+        session.add(run)
+        session.commit()
+
+
+def extract_error_detail(exc: Exception) -> str:
+    detail = getattr(exc, "detail", None)
+    if detail:
+        return str(detail)
+    return str(exc) or exc.__class__.__name__
 
 
 def reset_run_for_retry(session, run_id: int, next_attempt: int) -> None:  # type: ignore[no-untyped-def]
