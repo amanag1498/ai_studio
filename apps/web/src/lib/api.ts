@@ -602,6 +602,13 @@ export function signup(payload: { email: string; display_name: string; password:
   });
 }
 
+export function createAdmin(payload: { email: string; display_name: string; password: string; setup_token: string }) {
+  return requestJson<AuthResponse>("/auth/admin/create", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function login(payload: { email: string; password: string }) {
   return requestJson<AuthResponse>("/auth/login", {
     method: "POST",

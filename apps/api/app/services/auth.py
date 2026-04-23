@@ -33,18 +33,30 @@ def verify_password(password: str, encoded_hash: str) -> bool:
         return False
 
 
-def create_local_user(session: Session, *, email: str, display_name: str, password: str) -> AppUser:
+def has_admin_user(session: Session) -> bool:
+    return bool(session.scalar(select(AppUser.id).where(AppUser.role == "admin").limit(1)))
+
+
+def create_local_user(
+    session: Session,
+    *,
+    email: str,
+    display_name: str,
+    password: str,
+    role: str | None = None,
+) -> AppUser:
     normalized_email = email.strip().lower()
     existing = session.scalar(select(AppUser).where(AppUser.email == normalized_email))
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A user with this email already exists.")
 
     user_count = session.scalar(select(AppUser.id).limit(1))
+    requested_role = role if role in {"admin", "user"} else None
     user = AppUser(
         email=normalized_email,
         display_name=display_name.strip(),
         password_hash=hash_password(password),
-        role="admin" if user_count is None else "user",
+        role=requested_role or ("admin" if user_count is None else "user"),
     )
     session.add(user)
     session.flush()

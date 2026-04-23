@@ -98,6 +98,7 @@ OPENROUTER_MODEL=your_model_here
 OPENROUTER_TIMEOUT_SECONDS=30
 OPENROUTER_MAX_RETRIES=2
 LLM_PROVIDER=openrouter
+ADMIN_SETUP_TOKEN=optional_admin_creation_secret
 
 APP_STORAGE_DIR=./storage
 SQLALCHEMY_DATABASE_URL=sqlite:///./storage/sqlite/app.db
@@ -137,6 +138,20 @@ VITE_API_BASE_URL=http://localhost:8000
 ```
 
 `fastapi==0.115.9` is intentionally pinned because `chromadb==1.0.7` depends on that exact FastAPI version.
+
+## Login, Signup, and Roles
+
+AI Studio starts on a dedicated access page before the workspace shell. Use `Login` for existing local profiles, `Sign Up` for standard users, and `Create Admin` for admin profiles with full studio access.
+
+Admins can view and manage all workflows, admin usage dashboards, audit logs, observability, health, bundles, permissions, publishing, files, and knowledge surfaces. Users can create, edit, run, publish, and manage workflows they own or are explicitly permitted to access, but admin-only tabs and APIs are hidden or blocked.
+
+The first admin can be created from the `Create Admin` tab without a setup token. After an admin exists, set `ADMIN_SETUP_TOKEN` in the backend `.env` and enter that token in the `Create Admin` form to create additional admin profiles.
+
+```text
+POST /auth/signup        # creates a standard user
+POST /auth/login         # logs in an existing user
+POST /auth/admin/create  # creates an admin; token required after first admin
+```
 
 ## Main Pages
 

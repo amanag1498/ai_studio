@@ -25,6 +25,7 @@ Edit `.env` and set at least:
 OPENROUTER_API_KEY=your_key_here
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=your_model_here
+ADMIN_SETUP_TOKEN=optional_admin_creation_secret
 WEB_SEARCH_PROVIDER=duckduckgo
 OCR_TESSERACT_CMD=tesseract
 DATABASE_QUERY_ALLOW_WRITES=false
@@ -83,6 +84,7 @@ Edit `.env` and set:
 OPENROUTER_API_KEY=your_key_here
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=your_model_here
+ADMIN_SETUP_TOKEN=optional_admin_creation_secret
 WEB_SEARCH_PROVIDER=duckduckgo
 OCR_TESSERACT_CMD=tesseract
 DATABASE_QUERY_ALLOW_WRITES=false
@@ -124,6 +126,8 @@ Open:
 ```text
 http://localhost:5173
 ```
+
+On first launch, AI Studio shows the access page. Use `Create Admin` to create the first admin profile; no setup token is needed until an admin already exists. For additional admin profiles, set `ADMIN_SETUP_TOKEN` in `.env`, restart the backend, and enter that token in the admin creation form.
 
 ## Seed Sample Workflows
 

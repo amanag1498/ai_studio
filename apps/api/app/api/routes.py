@@ -29,7 +29,7 @@ from app.models.workflow import (
     WorkflowSubflow,
     WorkflowVersion,
 )
-from app.schemas.auth import AppUserRead, AuthResponse, UserLoginRequest, UserSignupRequest
+from app.schemas.auth import AdminCreateRequest, AppUserRead, AuthResponse, UserLoginRequest, UserSignupRequest
 from app.schemas.execution import ExecuteWorkflowRequest, WorkflowRunRead
 from app.schemas.publish import (
     PublishWorkflowRequest,
@@ -50,7 +50,7 @@ from app.schemas.workflows import (
     WorkflowVersionRead,
 )
 from app.services.admin import get_usage_dashboard
-from app.services.auth import create_local_session_token, create_local_user, login_local_user
+from app.services.auth import create_local_session_token, create_local_user, has_admin_user, login_local_user
 from app.services.execution import ExecutionContext, TypedPayload, execute_node, execute_workflow, get_run_or_404, typed_payload
 from app.services.execution_queue import cancel_workflow_run, enqueue_workflow_execution, queue_snapshot
 from app.services.files import persist_library_upload, persist_runtime_upload
@@ -86,6 +86,21 @@ def get_current_user_id(x_local_user_id: int | None = Header(default=None), db: 
     return user.id if user and user.is_active else None
 
 
+def get_current_user(x_local_user_id: int | None = Header(default=None), db: Session = Depends(get_db)) -> AppUser | None:
+    if x_local_user_id is None:
+        return None
+    user = db.get(AppUser, x_local_user_id)
+    return user if user and user.is_active else None
+
+
+def require_admin_user(current_user: AppUser | None = Depends(get_current_user)) -> AppUser:
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin login is required.")
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access is required.")
+    return current_user
+
+
 ROLE_RANK = {"viewer": 1, "runner": 2, "editor": 3, "owner": 4}
 
 
@@ -99,6 +114,9 @@ def ensure_workflow_access(
     if current_user_id is None:
         if settings.app_env.lower() == "production":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication is required.")
+        return
+    current_user = db.get(AppUser, current_user_id)
+    if current_user and current_user.role == "admin":
         return
     if workflow.created_by_user_id in {None, current_user_id} or workflow.updated_by_user_id == current_user_id:
         return
@@ -578,11 +596,32 @@ def signup_route(payload: UserSignupRequest, db: Session = Depends(get_db)) -> A
         email=payload.email,
         display_name=payload.display_name,
         password=payload.password,
+        role="user",
     )
     return AuthResponse(
         user=AppUserRead.model_validate(user),
         local_session_token=create_local_session_token(user),
         message="Local account created. This MVP token is stored client-side only.",
+    )
+
+
+@router.post("/auth/admin/create", response_model=AuthResponse, status_code=status.HTTP_201_CREATED, tags=["auth"])
+def create_admin_route(payload: AdminCreateRequest, db: Session = Depends(get_db)) -> AuthResponse:
+    admin_exists = has_admin_user(db)
+    expected_token = settings.admin_setup_token.strip()
+    if admin_exists and (not expected_token or payload.setup_token.strip() != expected_token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Valid ADMIN_SETUP_TOKEN is required to create another admin.")
+    user = create_local_user(
+        db,
+        email=payload.email,
+        display_name=payload.display_name,
+        password=payload.password,
+        role="admin",
+    )
+    return AuthResponse(
+        user=AppUserRead.model_validate(user),
+        local_session_token=create_local_session_token(user),
+        message="Admin account created. Store this local profile carefully.",
     )
 
 
@@ -597,7 +636,7 @@ def login_route(payload: UserLoginRequest, db: Session = Depends(get_db)) -> Aut
 
 
 @router.get("/admin/usage", tags=["admin"])
-def usage_dashboard_route(db: Session = Depends(get_db)) -> dict:
+def usage_dashboard_route(db: Session = Depends(get_db), _: AppUser = Depends(require_admin_user)) -> dict:
     return get_usage_dashboard(db)
 
 
@@ -606,6 +645,7 @@ def audit_logs_route(
     workflow_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
+    _: AppUser = Depends(require_admin_user),
 ) -> list[dict]:
     statement = select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit)
     if workflow_id is not None:
@@ -628,7 +668,7 @@ def audit_logs_route(
 
 
 @router.get("/admin/observability", tags=["admin"])
-def observability_dashboard_route(db: Session = Depends(get_db)) -> dict:
+def observability_dashboard_route(db: Session = Depends(get_db), _: AppUser = Depends(require_admin_user)) -> dict:
     return get_observability_dashboard(db)
 
 
@@ -786,7 +826,8 @@ def list_workflows_route(
     current_user_id: int | None = Depends(get_current_user_id),
 ) -> list[dict]:
     workflows = list_workflows(db, include_archived=include_archived)
-    if current_user_id is not None:
+    current_user = db.get(AppUser, current_user_id) if current_user_id is not None else None
+    if current_user is not None and current_user.role != "admin":
         permitted_workflow_ids = {
             row[0]
             for row in db.execute(

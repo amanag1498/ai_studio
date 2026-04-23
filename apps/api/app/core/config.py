@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     app_name: str = "AI Studio API"
     app_env: str = "development"
     app_storage_dir: str = str((REPO_ROOT / "storage").resolve())
+    admin_setup_token: str = ""
     sqlalchemy_database_url: str = f"sqlite:///{(REPO_ROOT / 'storage' / 'sqlite' / 'app.db').resolve()}"
     chroma_persist_dir: str = str((REPO_ROOT / "storage" / "chroma").resolve())
     uploads_dir: str = str((REPO_ROOT / "storage" / "uploads").resolve())

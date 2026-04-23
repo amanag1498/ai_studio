@@ -46,11 +46,9 @@ import {
   listWorkflowRuns,
   listWorkflowTemplates,
   listWorkflows,
-  login,
   publishWorkflow,
   restoreWorkflow,
   restoreWorkflowVersion,
-  signup,
   testKnowledgeRetrieval,
   unpublishWorkflow,
   updateWorkflowMetadata,
@@ -75,6 +73,8 @@ import {
 import type { BuilderGraph } from "@vmb/shared";
 
 type WorkflowsPageProps = {
+  authenticatedUser: AppUser | null;
+  onLogout: () => void;
   onCreateWorkflow: () => void;
   onOpenWorkflow: (workflowId: number) => void;
   onOpenWorkflowApp: (workflowId: number) => void;
@@ -130,21 +130,14 @@ function NavIcon({ name, className = "h-4 w-4" }: { name: NavIconName; className
   return <Icon className={className} aria-hidden strokeWidth={1.9} />;
 }
 
-export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflowApp, onOpenChat, onOpenFiles }: WorkflowsPageProps) {
+export function WorkflowsPage({ authenticatedUser, onLogout, onCreateWorkflow, onOpenWorkflow, onOpenWorkflowApp, onOpenChat, onOpenFiles }: WorkflowsPageProps) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [workflowKinds, setWorkflowKinds] = useState<Record<number, WorkflowLaunchKind>>({});
   const [workflowProfiles, setWorkflowProfiles] = useState<Record<number, WorkflowAppProfile>>({});
   const [usage, setUsage] = useState<UsageDashboard | null>(null);
   const [observability, setObservability] = useState<ObservabilityDashboard | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
-  const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
-    try {
-      const savedUser = localStorage.getItem("vmb-local-user");
-      return savedUser ? (JSON.parse(savedUser) as AppUser) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(authenticatedUser);
   const [templates, setTemplates] = useState<WorkflowSummary[]>([]);
   const [publishedChatbots, setPublishedChatbots] = useState<WorkflowSummary[]>([]);
   const [selectedWorkflowDetails, setSelectedWorkflowDetails] = useState<WorkflowRecord | null>(null);
@@ -171,13 +164,16 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   const [complexityFilter, setComplexityFilter] = useState<"all" | "basic" | "advanced" | "custom">("all");
   const [editingWorkflowId, setEditingWorkflowId] = useState<number | null>(null);
   const [editingWorkflowName, setEditingWorkflowName] = useState("");
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
-  const [authForm, setAuthForm] = useState({ email: "", display_name: "", password: "" });
   const [activeView, setActiveView] = useState<HomeView>("workflows");
   const [isLoading, setIsLoading] = useState(true);
-  const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [isFileUploading, setIsFileUploading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Loading workflows from the local API.");
+
+  useEffect(() => {
+    setCurrentUser(authenticatedUser);
+  }, [authenticatedUser]);
+
+  const isAdmin = currentUser?.role === "admin";
 
   useEffect(() => {
     void refreshWorkflows();
@@ -186,6 +182,12 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     void refreshPublishedChatbots();
     void refreshProductSurfaces();
   }, [showArchived]);
+
+  useEffect(() => {
+    if (!isAdmin && ["usage", "health", "bundle"].includes(activeView)) {
+      setActiveView("workflows");
+    }
+  }, [activeView, isAdmin]);
 
   const filteredWorkflows = workflows.filter((workflow) => {
     if (appTypeFilter !== "all" && workflowKinds[workflow.id] !== appTypeFilter) {
@@ -243,6 +245,12 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
   }
 
   async function refreshUsage() {
+    if (!isAdmin) {
+      setUsage(null);
+      setObservability(null);
+      setAuditLogs([]);
+      return;
+    }
     try {
       const [usageDashboard, observable, audits] = await Promise.all([
         getUsageDashboard(),
@@ -631,7 +639,10 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     { id: "account", label: "Account", short: "AC", detail: currentUser ? currentUser.role : "login", group: "System", tone: "from-white/80 to-lime/50", icon: "user" },
   ];
   const navGroups = ["Operate", "Observe", "Ship", "Data", "Build", "System"];
-  const activeNavItem = navItems.find((item) => item.id === activeView) || navItems[0];
+  const adminOnlyViews = new Set<HomeView>(["usage", "health", "bundle"]);
+  const visibleNavItems = navItems.filter((item) => isAdmin || !adminOnlyViews.has(item.id));
+  const visibleNavGroups = navGroups.filter((group) => visibleNavItems.some((item) => item.group === group));
+  const activeNavItem = visibleNavItems.find((item) => item.id === activeView) || visibleNavItems[0] || navItems[0];
   const activeTitle: Record<HomeView, string> = {
     workflows: "Operate your AI workflows",
     create: "Create a workflow workspace",
@@ -716,31 +727,8 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
     { id: "custom", label: "Custom", detail: String(workflows.filter((workflow) => getWorkflowComplexity(workflow) === "custom").length) },
   ];
 
-  async function submitAuth(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setIsAuthBusy(true);
-    try {
-      const response =
-        authMode === "signup"
-          ? await signup(authForm)
-          : await login({ email: authForm.email, password: authForm.password });
-      localStorage.setItem("vmb-local-user", JSON.stringify(response.user));
-      localStorage.setItem("vmb-local-session-token", response.local_session_token);
-      setCurrentUser(response.user);
-      setStatusMessage(response.message);
-      setAuthForm({ email: "", display_name: "", password: "" });
-      await refreshUsage();
-    } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Authentication failed.");
-    } finally {
-      setIsAuthBusy(false);
-    }
-  }
-
   function logoutLocalUser() {
-    localStorage.removeItem("vmb-local-user");
-    localStorage.removeItem("vmb-local-session-token");
-    setCurrentUser(null);
+    onLogout();
     setStatusMessage("Logged out locally.");
   }
 
@@ -809,8 +797,8 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
             </div>
 
             <div className="flex min-w-max flex-1 gap-2 lg:min-w-0 lg:flex-col lg:overflow-y-auto lg:pr-1.5">
-              {navGroups.map((group) => {
-                const groupItems = navItems.filter((item) => item.group === group);
+              {visibleNavGroups.map((group) => {
+                const groupItems = visibleNavItems.filter((item) => item.group === group);
                 if (!groupItems.length) return null;
                 return (
                   <div key={group} className="flex gap-2 lg:block">
@@ -1986,7 +1974,7 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-ink/45">
                 Local Users
               </p>
-              <h2 className="mt-2 text-2xl font-bold">Login & signup</h2>
+              <h2 className="mt-2 text-2xl font-bold">Profile & access</h2>
               {currentUser ? (
                 <div className="mt-4 rounded-[1.5rem] bg-lime/25 p-4">
                   <p className="text-sm font-semibold text-ink">Signed in as {currentUser.display_name}</p>
@@ -2000,49 +1988,19 @@ export function WorkflowsPage({ onCreateWorkflow, onOpenWorkflow, onOpenWorkflow
                   </button>
                 </div>
               ) : (
-                <form onSubmit={submitAuth} className="mt-4 space-y-3">
-                  <div className="grid grid-cols-2 gap-2 rounded-full bg-mist p-1">
-                    {(["login", "signup"] as const).map((mode) => (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() => setAuthMode(mode)}
-                        className={`rounded-full px-4 py-2 text-sm font-semibold capitalize ${authMode === mode ? "bg-ink text-white" : "text-ink/62"}`}
-                      >
-                        {mode}
-                      </button>
-                    ))}
-                  </div>
-                  {authMode === "signup" ? (
-                    <input
-                      value={authForm.display_name}
-                      onChange={(event) => setAuthForm((current) => ({ ...current, display_name: event.target.value }))}
-                      placeholder="Display name"
-                      className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none"
-                    />
-                  ) : null}
-                  <input
-                    value={authForm.email}
-                    onChange={(event) => setAuthForm((current) => ({ ...current, email: event.target.value }))}
-                    placeholder="Email"
-                    type="email"
-                    className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none"
-                  />
-                  <input
-                    value={authForm.password}
-                    onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))}
-                    placeholder="Password"
-                    type="password"
-                    className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm outline-none"
-                  />
+                <div className="mt-4 rounded-[1.5rem] bg-mist/70 p-4">
+                  <p className="text-sm font-semibold text-ink">You are not signed in.</p>
+                  <p className="mt-1 text-xs leading-5 text-ink/58">
+                    Return to the AI Studio access screen to login, sign up, or create an admin profile.
+                  </p>
                   <button
-                    type="submit"
-                    disabled={isAuthBusy}
-                    className="w-full rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
+                    type="button"
+                    onClick={logoutLocalUser}
+                    className="mt-4 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white"
                   >
-                    {isAuthBusy ? "Working..." : authMode === "signup" ? "Create Local User" : "Login Locally"}
+                    Open Access Screen
                   </button>
-                </form>
+                </div>
               )}
             </div>
             <div className="rounded-[2rem] border border-white/70 bg-ink p-5 text-white shadow-panel">

@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { AuthLandingPage } from "./components/AuthLandingPage";
 import { BuilderPage } from "./components/BuilderPage";
 import { FileLibraryPage } from "./components/FileLibraryPage";
 import { PublishedChatPage } from "./components/PublishedChatPage";
 import { RunPage } from "./components/RunPage";
 import { WorkflowAppPage } from "./components/WorkflowAppPage";
 import { WorkflowsPage } from "./components/WorkflowsPage";
+import type { AppUser } from "./lib/api";
 
 function navigateTo(path: string) {
   window.history.pushState({}, "", path);
@@ -13,6 +15,14 @@ function navigateTo(path: string) {
 
 export default function App() {
   const [path, setPath] = useState(window.location.pathname);
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
+    try {
+      const savedUser = localStorage.getItem("vmb-local-user");
+      return savedUser ? (JSON.parse(savedUser) as AppUser) : null;
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     function syncPath() {
@@ -32,6 +42,17 @@ export default function App() {
   const chatMatch = path.match(/^\/chat\/([^/]+)$/);
   const appMatch = path.match(/^\/app\/(\d+)$/);
   const runMatch = path.match(/^\/runs\/(\d+)\/(\d+)$/);
+
+  if (!currentUser && !chatMatch) {
+    return (
+      <AuthLandingPage
+        onAuthenticated={(user) => {
+          setCurrentUser(user);
+          navigateTo("/");
+        }}
+      />
+    );
+  }
 
   if (runMatch) {
     return (
@@ -85,6 +106,13 @@ export default function App() {
 
   return (
     <WorkflowsPage
+      authenticatedUser={currentUser}
+      onLogout={() => {
+        localStorage.removeItem("vmb-local-user");
+        localStorage.removeItem("vmb-local-session-token");
+        setCurrentUser(null);
+        navigateTo("/");
+      }}
       onCreateWorkflow={() => navigateTo("/builder")}
       onOpenWorkflow={(workflowId) => navigateTo(`/builder/${workflowId}`)}
       onOpenChat={(slug) => navigateTo(`/chat/${slug}`)}
